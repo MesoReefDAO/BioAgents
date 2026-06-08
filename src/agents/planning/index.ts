@@ -391,6 +391,21 @@ async function buildContextFromState(
     );
   }
 
+  if (conversationState.values.researchBrainEvidence) {
+    try {
+      const { formatEvidencePackForPrompt } = await import(
+        "../../services/researchBrain"
+      );
+      contextParts.push(
+        `Research Brain Evidence (strict first source of truth; do not plan as if unsupported claims are facts):\n${formatEvidencePackForPrompt(
+          conversationState.values.researchBrainEvidence,
+        )}`,
+      );
+    } catch (error) {
+      logger.warn({ error }, "research_brain_context_format_failed");
+    }
+  }
+
   if (conversationState.values.keyInsights?.length) {
     contextParts.push(
       `Key Insights:\n${conversationState.values.keyInsights.map((insight, i) => `  ${i + 1}. ${insight}`).join("\n")}`,

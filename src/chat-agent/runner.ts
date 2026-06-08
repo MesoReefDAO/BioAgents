@@ -5,8 +5,8 @@
  * All imports are dynamic to avoid TDZ issues in the worker process.
  */
 
-import type { ToolCallInfo } from "./types";
 import type { MessageParam } from "@anthropic-ai/sdk/resources/messages";
+import type { ToolCallInfo } from "./types";
 
 // ---------------------------------------------------------------------------
 // Public interface
@@ -43,6 +43,13 @@ const AGENT_SYSTEM_PROMPT = `You are a helpful AI research assistant specializin
 
 TOOL USE
 - Use literature_search only for questions that need current research, specific papers, recent findings, or evidence-backed claims.
+- Use research_brain_search before literature_search for any scientific factual claim. Treat Research Brain as the first source of truth for loaded papers and datasets.
+- If Research Brain has no supported or partial evidence, say that the loaded papers do not provide enough evidence instead of making a factual scientific claim.
+- Clearly separate internal loaded-paper evidence from external literature evidence.
+- When Research Brain provides evidence, include a compact "Evidencia" section with the source title, DOI link, internal fragment link, fragment/page when available, and short quoted snippets from the evidence pack. Do not omit provenance for paper-specific answers.
+- For bioprospection questions, prefer structured bioprospecting facts from Research Brain and explicitly distinguish direct evidence, indirect evidence, hypotheses, and open questions.
+- Follow the Research Brain query plan when present: use its strategy, answer sections, and cautions before adding any broader synthesis.
+- Use "fragmento" in Spanish user-facing answers, not "chunk". If the evidence pack provides an internal fragment link like /library/...?... , cite claim-level evidence with that link so the user lands inside the local paper view. Use DOI links only for the public paper reference.
 - You may call literature_search more than once with different source parameters (e.g. openscholar, biolit, knowledge) to cross-reference findings when accuracy matters.
 - For basic definitions, standard mechanisms, textbook explanations, or simple clarifications, answer directly without tools.
 - Do not cite specific papers, DOIs, URLs, journals, or publication details unless they came from a tool result or were explicitly provided in the conversation or uploaded materials.
@@ -78,10 +85,13 @@ export async function runChatAgent(
   const logger = (await import("../utils/logger")).default;
 
   // --- 1. Register tools (side-effect import, idempotent) ---
+  await import("./tools/research-brain-search");
   await import("./tools/literature-search");
 
   // --- 2. Read env config (inside function, not module-level) ---
-  const provider = (process.env.CHAT_AGENT_LLM_PROVIDER || "anthropic").toLowerCase();
+  const provider = (
+    process.env.CHAT_AGENT_LLM_PROVIDER || "anthropic"
+  ).toLowerCase();
 
   let apiKey: string;
   if (provider === "openrouter") {
@@ -101,8 +111,7 @@ export async function runChatAgent(
     (provider === "openrouter" ? "qwen/qwen3.6-plus" : "claude-sonnet-4-6");
   const maxToolCalls =
     parseInt(process.env.CHAT_AGENT_MAX_TOOL_CALLS || "") || 10;
-  const maxTokens =
-    parseInt(process.env.CHAT_AGENT_MAX_TOKENS || "") || 4096;
+  const maxTokens = parseInt(process.env.CHAT_AGENT_MAX_TOKENS || "") || 4096;
 
   // --- 3. Build system prompt + dataset context for user message ---
   const systemPrompt = AGENT_SYSTEM_PROMPT;
@@ -110,13 +119,29 @@ export async function runChatAgent(
   // Dataset content goes in the user message, NOT the system prompt,
   // to avoid elevating untrusted file contents to system-level authority.
   let userMessage = params.message;
+  let initialEvidencePack: any | null = null;
+
+  try {
+    const { researchBrainSearch, formatEvidencePackForPrompt } =
+      await import("../services/researchBrain");
+    initialEvidencePack = await researchBrainSearch({
+      query: params.message,
+      trustTier: "internal",
+      includeExternal: false,
+      limit: 10,
+    });
+    userMessage += `\n\n${formatEvidencePackForPrompt(initialEvidencePack)}\n\nStrict evidence instruction: use the evidence pack above as the first source of truth. If it contains no supported/partial claims and no bioprospecting facts, do not present loaded-paper claims as established facts.`;
+  } catch (err) {
+    logger.warn({ error: err }, "research_brain_initial_context_failed");
+  }
 
   if (params.uploadedDatasets && params.uploadedDatasets.length > 0) {
     const datasetContext = params.uploadedDatasets
       .slice(0, 3) // Cap at 3 datasets
       .map((d) => {
         let entry = `### ${d.filename.replace(/[\r\n]/g, " ")}`;
-        if (d.description) entry += `\n${d.description.replace(/[\r\n]/g, " ")}`;
+        if (d.description)
+          entry += `\n${d.description.replace(/[\r\n]/g, " ")}`;
         if (d.content) {
           const sanitized = d.content.slice(0, 2000).replace(/`{3,}/g, "` ` `");
           entry += `\n\`\`\`\n${sanitized}${d.content.length > 2000 ? "\n..." : ""}\n\`\`\``;
@@ -207,9 +232,24 @@ export async function runChatAgent(
           conversationHistory.length > 0 ? conversationHistory : undefined,
         );
 
+  let finalText = agentResult.finalText;
+  if (initialEvidencePack && finalText && !agentResult.hitMaxTokens) {
+    try {
+      const { verifyEvidenceGroundedResponse } =
+        await import("../services/researchBrain");
+      finalText = await verifyEvidenceGroundedResponse({
+        question: params.message,
+        draft: finalText,
+        evidencePack: initialEvidencePack,
+      });
+    } catch (err) {
+      logger.warn({ error: err }, "research_brain_verifier_failed");
+    }
+  }
+
   // --- 6. Return unified result ---
   return {
-    replyText: agentResult.finalText,
+    replyText: finalText,
     toolCallCount: agentResult.toolCallCount,
     totalInputTokens: agentResult.totalInputTokens,
     totalOutputTokens: agentResult.totalOutputTokens,

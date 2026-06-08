@@ -1129,6 +1129,26 @@ async function runDeepResearch(params: {
       const iterationStartTime = Date.now();
       logger.info({ iterationCount, maxAutoIterations }, "starting_iteration");
 
+      try {
+        const { researchBrainSearch } = await import(
+          "../../services/researchBrain"
+        );
+        conversationState.values.researchBrainEvidence =
+          await researchBrainSearch({
+            query:
+              conversationState.values.currentObjective ||
+              conversationState.values.evolvingObjective ||
+              conversationState.values.objective ||
+              currentMessage.question ||
+              createdMessage.question,
+            trustTier: "internal",
+            includeExternal: false,
+            limit: 12,
+          });
+      } catch (error) {
+        logger.warn({ error }, "deep_research_research_brain_search_failed");
+      }
+
       if (!skipPlanning) {
         await persistConversationActivity(
           {
@@ -1937,10 +1957,36 @@ These molecular changes align with established longevity pathways (Converging nu
         isFinal,
       });
 
+      let groundedReply = replyResult.reply;
+      try {
+        const { verifyEvidenceGroundedResponse, writeResearchMemory } =
+          await import("../../services/researchBrain");
+        if (conversationState.values.researchBrainEvidence) {
+          groundedReply = await verifyEvidenceGroundedResponse({
+            question: currentMessage.question || createdMessage.question,
+            draft: replyResult.reply,
+            evidencePack: conversationState.values.researchBrainEvidence,
+          });
+        }
+        await writeResearchMemory({
+          title: `Deep Research memory: ${
+            conversationState.values.currentObjective ||
+            currentMessage.question ||
+            createdMessage.question
+          }`,
+          text: groundedReply,
+          conversationId: currentMessage.conversation_id,
+          messageId: currentMessage.id,
+          trustTier: "internal",
+        });
+      } catch (error) {
+        logger.warn({ error }, "deep_research_memory_or_verifier_failed");
+      }
+
       // Update the current message with the reply and mark as complete
       const iterationResponseTime = Date.now() - iterationStartTime;
       await updateMessage(currentMessage.id, {
-        content: replyResult.reply,
+        content: groundedReply,
         summary: replyResult.summary,
         response_time: iterationResponseTime, // Mark message as complete so UI displays it
       });
@@ -1949,7 +1995,7 @@ These molecular changes align with established longevity pathways (Converging nu
         {
           messageId: currentMessage.id,
           iterationCount,
-          contentLength: replyResult.reply.length,
+          contentLength: groundedReply.length,
         },
         "iteration_reply_saved",
       );

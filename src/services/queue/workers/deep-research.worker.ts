@@ -328,6 +328,28 @@ async function processDeepResearchJob(
       "starting_iteration",
     );
 
+    try {
+      const { researchBrainSearch } = await import(
+        "../../../services/researchBrain"
+      );
+      conversationState.values.researchBrainEvidence = await researchBrainSearch({
+        query:
+          conversationState.values.currentObjective ||
+          conversationState.values.evolvingObjective ||
+          conversationState.values.objective ||
+          messageRecord.question ||
+          message,
+        trustTier: "internal",
+        includeExternal: false,
+        limit: 12,
+      });
+    } catch (error) {
+      logger.warn(
+        { error, jobId: job.id },
+        "deep_research_worker_research_brain_search_failed",
+      );
+    }
+
     // =========================================================================
     // SINGLE ITERATION EXECUTION
     // =========================================================================
@@ -1088,8 +1110,38 @@ async function processDeepResearchJob(
       isFinal,
     });
 
+    let groundedReply = replyResult.reply;
+    try {
+      const { verifyEvidenceGroundedResponse, writeResearchMemory } =
+        await import("../../../services/researchBrain");
+      if (conversationState.values.researchBrainEvidence) {
+        groundedReply = await verifyEvidenceGroundedResponse({
+          question: currentMessage.question || messageRecord.question || message,
+          draft: replyResult.reply,
+          evidencePack: conversationState.values.researchBrainEvidence,
+        });
+      }
+      await writeResearchMemory({
+        title: `Deep Research memory: ${
+          conversationState.values.currentObjective ||
+          currentMessage.question ||
+          messageRecord.question ||
+          message
+        }`,
+        text: groundedReply,
+        conversationId,
+        messageId: currentMessage.id,
+        trustTier: "internal",
+      });
+    } catch (error) {
+      logger.warn(
+        { error, jobId: job.id },
+        "deep_research_worker_memory_or_verifier_failed",
+      );
+    }
+
     // Warn if reply is empty
-    if (!replyResult.reply || replyResult.reply.trim().length === 0) {
+    if (!groundedReply || groundedReply.trim().length === 0) {
       logger.warn(
         {
           jobId: job.id,
@@ -1104,7 +1156,7 @@ async function processDeepResearchJob(
     // Update the current message with the reply and mark as complete
     const iterationResponseTime = Date.now() - startTime;
     await updateMessage(currentMessage.id, {
-      content: replyResult.reply,
+      content: groundedReply,
       summary: replyResult.summary,
       response_time: iterationResponseTime, // Mark message as complete so UI displays it
     });
@@ -1114,7 +1166,7 @@ async function processDeepResearchJob(
         jobId: job.id,
         messageId: currentMessage.id,
         iterationNumber,
-        contentLength: replyResult.reply?.length || 0,
+        contentLength: groundedReply?.length || 0,
       },
       "iteration_reply_saved",
     );

@@ -1,0 +1,571 @@
+import { Elysia } from "elysia";
+import { mkdir } from "fs/promises";
+import path from "path";
+import { authResolver } from "../middleware/authResolver";
+import {
+  backfillBioprospectingMeasurements,
+  extractBioprospectingFactsForSource,
+  extractClaimsForSource,
+  getClaim,
+  getSourceClaims,
+  getSourceEvidenceChunk,
+  listResearchTaxa,
+  listSources,
+  normalizeBioprospectingTaxonomy,
+  researchBrainSearch,
+  searchBioprospectingFacts,
+  updateBioprospectingFactEntities,
+  updateBioprospectingFactReview,
+  updateBioprospectingFactsReviewBulk,
+} from "../services/researchBrain";
+import logger from "../utils/logger";
+
+function getDocsPath(): string {
+  return process.env.KNOWLEDGE_DOCS_PATH || "docs";
+}
+
+function safeUploadPath(filename: string): string {
+  const docsRoot = path.resolve(getDocsPath());
+  const safeName = path.basename(filename).replace(/[^\w.\- ()]/g, "_");
+  return path.resolve(docsRoot, safeName);
+}
+
+export const researchBrainRoute = new Elysia({ prefix: "/api/research-brain" })
+  .get(
+    "/sources",
+    async ({ set }) => {
+      try {
+        return { sources: await listSources() };
+      } catch (error: any) {
+        logger.error({ err: error }, "research_brain_sources_failed");
+        set.status = 500;
+        return {
+          error: "Failed to list Research Brain sources",
+          message: error?.message,
+        };
+      }
+    },
+    { beforeHandle: authResolver({ required: false }) },
+  )
+  .get(
+    "/sources/:id/claims",
+    async ({ params, set }) => {
+      try {
+        return { claims: await getSourceClaims(params.id) };
+      } catch (error: any) {
+        logger.error(
+          { err: error, sourceId: params.id },
+          "research_brain_source_claims_failed",
+        );
+        set.status = 500;
+        return {
+          error: "Failed to list source claims",
+          message: error?.message,
+        };
+      }
+    },
+    { beforeHandle: authResolver({ required: false }) },
+  )
+  .get(
+    "/sources/:id/chunks/:chunkIndex",
+    async ({ params, set }) => {
+      const chunkIndex = Number(params.chunkIndex);
+      if (!Number.isFinite(chunkIndex)) {
+        set.status = 400;
+        return { error: "Invalid chunk index" };
+      }
+
+      try {
+        const chunk = await getSourceEvidenceChunk(params.id, chunkIndex);
+        if (!chunk) {
+          set.status = 404;
+          return { error: "Evidence fragment not found" };
+        }
+        return { chunk };
+      } catch (error: any) {
+        logger.error(
+          { err: error, sourceId: params.id, chunkIndex },
+          "research_brain_source_chunk_failed",
+        );
+        set.status = 500;
+        return {
+          error: "Failed to load evidence fragment",
+          message: error?.message,
+        };
+      }
+    },
+    { beforeHandle: authResolver({ required: false }) },
+  )
+  .post(
+    "/search",
+    async ({ body, set }) => {
+      const parsed = (body || {}) as {
+        query?: string;
+        trustTier?: "internal" | "external" | "all";
+        includeExternal?: boolean;
+        limit?: number;
+        measurementMin?: number;
+        measurementMax?: number;
+        measurementUnit?: string;
+        measurementDirection?: "increase" | "decrease" | "no_change" | "mixed";
+        condition?: string;
+        reviewStatus?:
+          | "unreviewed"
+          | "verified"
+          | "needs_review"
+          | "incorrect"
+          | "quarantined"
+          | "all";
+        evidenceStrength?:
+          | "direct"
+          | "indirect"
+          | "hypothesis"
+          | "unknown"
+          | "all";
+        sourceId?: string;
+        sourceTrustTier?: "internal" | "external" | "all";
+      };
+
+      if (!parsed.query || !parsed.query.trim()) {
+        set.status = 400;
+        return { error: "Missing query" };
+      }
+
+      try {
+        const evidencePack = await researchBrainSearch({
+          query: parsed.query,
+          trustTier: parsed.trustTier,
+          includeExternal: parsed.includeExternal,
+          limit: parsed.limit,
+          measurementMin: parsed.measurementMin,
+          measurementMax: parsed.measurementMax,
+          measurementUnit: parsed.measurementUnit,
+          measurementDirection: parsed.measurementDirection,
+          condition: parsed.condition,
+          reviewStatus: parsed.reviewStatus,
+          evidenceStrength: parsed.evidenceStrength,
+          sourceId: parsed.sourceId,
+          sourceTrustTier: parsed.sourceTrustTier,
+        });
+        return { evidencePack };
+      } catch (error: any) {
+        logger.error(
+          { err: error, query: parsed.query },
+          "research_brain_search_failed",
+        );
+        set.status = 500;
+        return {
+          error: "Failed to search Research Brain",
+          message: error?.message,
+        };
+      }
+    },
+    { beforeHandle: authResolver({ required: false }) },
+  )
+  .post(
+    "/bioprospecting/search",
+    async ({ body, set }) => {
+      const parsed = (body || {}) as {
+        query?: string;
+        limit?: number;
+        measurementMin?: number;
+        measurementMax?: number;
+        measurementUnit?: string;
+        measurementDirection?: "increase" | "decrease" | "no_change" | "mixed";
+        condition?: string;
+        reviewStatus?:
+          | "unreviewed"
+          | "verified"
+          | "needs_review"
+          | "incorrect"
+          | "quarantined"
+          | "all";
+        sourceId?: string;
+        sourceTrustTier?: "internal" | "external" | "all";
+      };
+
+      if (!parsed.query || !parsed.query.trim()) {
+        set.status = 400;
+        return { error: "Missing query" };
+      }
+
+      try {
+        return {
+          facts: await searchBioprospectingFacts({
+            query: parsed.query,
+            limit: parsed.limit,
+            measurementMin: parsed.measurementMin,
+            measurementMax: parsed.measurementMax,
+            measurementUnit: parsed.measurementUnit,
+            measurementDirection: parsed.measurementDirection,
+            condition: parsed.condition,
+            reviewStatus: parsed.reviewStatus,
+            sourceId: parsed.sourceId,
+            sourceTrustTier: parsed.sourceTrustTier,
+          }),
+        };
+      } catch (error: any) {
+        logger.error(
+          { err: error, query: parsed.query },
+          "bioprospecting_search_failed",
+        );
+        set.status = 500;
+        return {
+          error: "Failed to search bioprospecting facts",
+          message: error?.message,
+        };
+      }
+    },
+    { beforeHandle: authResolver({ required: false }) },
+  )
+  .post(
+    "/bioprospecting/measurements/backfill",
+    async ({ body, set }) => {
+      const parsed = (body || {}) as {
+        limit?: number;
+        dryRun?: boolean;
+      };
+
+      try {
+        return await backfillBioprospectingMeasurements({
+          limit: parsed.limit,
+          dryRun: parsed.dryRun,
+        });
+      } catch (error: any) {
+        logger.error(
+          { err: error },
+          "bioprospecting_measurement_backfill_failed",
+        );
+        set.status = 500;
+        return {
+          error: "Failed to backfill bioprospecting measurements",
+          message: error?.message,
+        };
+      }
+    },
+    { beforeHandle: authResolver({ required: true }) },
+  )
+  .patch(
+    "/bioprospecting/facts/:id/review",
+    async ({ params, body, request, set }) => {
+      const parsed = (body || {}) as {
+        reviewStatus?: string;
+        reviewNote?: string | null;
+      };
+      const allowedStatuses = new Set([
+        "unreviewed",
+        "verified",
+        "needs_review",
+        "incorrect",
+        "quarantined",
+      ]);
+
+      if (!parsed.reviewStatus || !allowedStatuses.has(parsed.reviewStatus)) {
+        set.status = 400;
+        return { error: "Invalid review status" };
+      }
+
+      try {
+        return {
+          fact: await updateBioprospectingFactReview({
+            factId: params.id,
+            reviewStatus: parsed.reviewStatus as any,
+            reviewNote: parsed.reviewNote,
+            reviewedBy: (request as any).auth?.userId,
+          }),
+        };
+      } catch (error: any) {
+        logger.error(
+          { err: error, factId: params.id },
+          "bioprospecting_review_update_failed",
+        );
+        set.status = 500;
+        return {
+          error: "Failed to update bioprospecting fact review",
+          message: error?.message,
+        };
+      }
+    },
+    { beforeHandle: authResolver({ required: true }) },
+  )
+  .patch(
+    "/bioprospecting/facts/review-bulk",
+    async ({ body, request, set }) => {
+      const parsed = (body || {}) as {
+        factIds?: string[];
+        reviewStatus?: string;
+        reviewNote?: string | null;
+      };
+      const allowedStatuses = new Set([
+        "unreviewed",
+        "verified",
+        "needs_review",
+        "incorrect",
+        "quarantined",
+      ]);
+      const factIds = Array.isArray(parsed.factIds)
+        ? parsed.factIds.filter(Boolean)
+        : [];
+
+      if (factIds.length === 0) {
+        set.status = 400;
+        return { error: "Missing fact ids" };
+      }
+      if (factIds.length > 250) {
+        set.status = 400;
+        return { error: "Bulk review is limited to 250 facts per request" };
+      }
+      if (!parsed.reviewStatus || !allowedStatuses.has(parsed.reviewStatus)) {
+        set.status = 400;
+        return { error: "Invalid review status" };
+      }
+
+      try {
+        const facts = await updateBioprospectingFactsReviewBulk({
+          factIds,
+          reviewStatus: parsed.reviewStatus as any,
+          reviewNote: parsed.reviewNote,
+          reviewedBy: (request as any).auth?.userId,
+        });
+        return { facts, updated: facts.length };
+      } catch (error: any) {
+        logger.error({ err: error }, "bioprospecting_bulk_review_failed");
+        set.status = 500;
+        return {
+          error: "Failed to bulk update bioprospecting fact reviews",
+          message: error?.message,
+        };
+      }
+    },
+    { beforeHandle: authResolver({ required: true }) },
+  )
+  .patch(
+    "/bioprospecting/facts/:id/entities",
+    async ({ params, body, request, set }) => {
+      const parsed = (body || {}) as {
+        species?: string | null;
+        genus?: string | null;
+        family?: string | null;
+        organismGroup?: string | null;
+        geography?: string | null;
+        ecosystem?: string | null;
+        organismPart?: string | null;
+        compound?: string | null;
+        compoundClass?: string | null;
+        moleculeType?: string | null;
+        bioactivity?: string | null;
+        applicationArea?: string | null;
+        assayModel?: string | null;
+        condition?: string | null;
+      };
+
+      try {
+        return {
+          fact: await updateBioprospectingFactEntities({
+            factId: params.id,
+            correctedBy: (request as any).auth?.userId,
+            patch: {
+              species: parsed.species,
+              genus: parsed.genus,
+              family: parsed.family,
+              organism_group: parsed.organismGroup,
+              geography: parsed.geography,
+              ecosystem: parsed.ecosystem,
+              organism_part: parsed.organismPart,
+              compound: parsed.compound,
+              compound_class: parsed.compoundClass,
+              molecule_type: parsed.moleculeType,
+              bioactivity: parsed.bioactivity,
+              application_area: parsed.applicationArea,
+              assay_model: parsed.assayModel,
+              condition: parsed.condition,
+            },
+          }),
+        };
+      } catch (error: any) {
+        logger.error(
+          { err: error, factId: params.id },
+          "bioprospecting_entity_update_failed",
+        );
+        set.status = 500;
+        return {
+          error: "Failed to update bioprospecting fact entities",
+          message: error?.message,
+        };
+      }
+    },
+    { beforeHandle: authResolver({ required: true }) },
+  )
+  .get(
+    "/taxonomy",
+    async ({ query, set }) => {
+      const parsed = query as {
+        rank?: "species" | "genus" | "family" | "higher_taxon";
+        q?: string;
+        limit?: string;
+      };
+
+      try {
+        return {
+          taxa: await listResearchTaxa({
+            rank: parsed.rank,
+            query: parsed.q,
+            limit: parsed.limit ? Number(parsed.limit) : undefined,
+          }),
+        };
+      } catch (error: any) {
+        logger.error({ err: error }, "research_taxonomy_list_failed");
+        set.status = 500;
+        return {
+          error: "Failed to list normalized taxonomy",
+          message: error?.message,
+        };
+      }
+    },
+    { beforeHandle: authResolver({ required: false }) },
+  )
+  .post(
+    "/taxonomy/normalize",
+    async ({ body, set }) => {
+      const parsed = (body || {}) as {
+        limit?: number;
+        dryRun?: boolean;
+        onlyMissing?: boolean;
+        useWoRMS?: boolean;
+      };
+
+      try {
+        return await normalizeBioprospectingTaxonomy({
+          limit: parsed.limit,
+          dryRun: parsed.dryRun,
+          onlyMissing: parsed.onlyMissing,
+          useWoRMS: parsed.useWoRMS,
+        });
+      } catch (error: any) {
+        logger.error({ err: error }, "research_taxonomy_normalize_failed");
+        set.status = 500;
+        return {
+          error: "Failed to normalize taxonomy",
+          message: error?.message,
+        };
+      }
+    },
+    { beforeHandle: authResolver({ required: true }) },
+  )
+  .post(
+    "/sources/:id/extract",
+    async ({ params, set }) => {
+      try {
+        return await extractClaimsForSource(params.id);
+      } catch (error: any) {
+        logger.error(
+          { err: error, sourceId: params.id },
+          "research_brain_extract_failed",
+        );
+        set.status = 500;
+        return {
+          error: "Failed to extract source claims",
+          message: error?.message,
+        };
+      }
+    },
+    { beforeHandle: authResolver({ required: true }) },
+  )
+  .post(
+    "/sources/:id/extract-bioprospecting",
+    async ({ params, set }) => {
+      try {
+        return await extractBioprospectingFactsForSource(params.id);
+      } catch (error: any) {
+        logger.error(
+          { err: error, sourceId: params.id },
+          "bioprospecting_extract_failed",
+        );
+        set.status = 500;
+        return {
+          error: "Failed to extract bioprospecting facts",
+          message: error?.message,
+        };
+      }
+    },
+    { beforeHandle: authResolver({ required: true }) },
+  )
+  .get(
+    "/claims/:id",
+    async ({ params, set }) => {
+      try {
+        const claim = await getClaim(params.id);
+        if (!claim) {
+          set.status = 404;
+          return { error: "Claim not found" };
+        }
+        return { claim };
+      } catch (error: any) {
+        logger.error(
+          { err: error, claimId: params.id },
+          "research_brain_claim_failed",
+        );
+        set.status = 500;
+        return { error: "Failed to load claim", message: error?.message };
+      }
+    },
+    { beforeHandle: authResolver({ required: false }) },
+  )
+  .post(
+    "/sources/upload",
+    async ({ body, set }) => {
+      const parsed = body as any;
+      const file = parsed?.file instanceof File ? parsed.file : null;
+      if (!file) {
+        set.status = 400;
+        return { error: "Missing file" };
+      }
+
+      const destination = safeUploadPath(file.name);
+      const docsRoot = path.resolve(getDocsPath());
+      if (
+        destination !== docsRoot &&
+        !destination.startsWith(docsRoot + path.sep)
+      ) {
+        set.status = 400;
+        return { error: "Invalid filename" };
+      }
+
+      try {
+        await mkdir(docsRoot, { recursive: true });
+        await Bun.write(destination, file);
+
+        const { VectorSearchWithDocuments } =
+          await import("../embeddings/vectorSearchWithDocs");
+        let vectorSearch = (globalThis as any).__knowledgeVectorSearch;
+        if (!vectorSearch) {
+          vectorSearch = new VectorSearchWithDocuments();
+          (globalThis as any).__knowledgeVectorSearch = vectorSearch;
+        }
+
+        const added = await vectorSearch.addFile(destination);
+
+        logger.info(
+          { filename: file.name, destination, sourceId: added.sourceId },
+          "research_brain_source_uploaded",
+        );
+
+        return {
+          ok: true,
+          title: added.title,
+          chunkCount: added.chunkCount,
+          sourceId: added.sourceId,
+        };
+      } catch (error: any) {
+        logger.error(
+          { err: error, filename: file.name },
+          "research_brain_upload_failed",
+        );
+        set.status = 500;
+        return { error: "Failed to upload source", message: error?.message };
+      }
+    },
+    { beforeHandle: authResolver({ required: true }) },
+  );
+
+export default researchBrainRoute;

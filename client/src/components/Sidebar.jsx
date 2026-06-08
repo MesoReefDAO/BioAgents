@@ -119,6 +119,14 @@ export function Sidebar({ sessions, currentSessionId, onSessionSelect, onNewSess
             >
               Library
             </Button>
+            <Button
+              variant="ghost"
+              icon="brainCircuit"
+              onClick={() => route('/brain')}
+              className="sidebar-library-btn"
+            >
+              Research Brain
+            </Button>
           </>
         )}
         {isCollapsed && (

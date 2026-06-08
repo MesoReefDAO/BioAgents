@@ -1,6 +1,8 @@
+import { useState } from "preact/hooks";
 import { route } from "preact-router";
 import { useLibraryList } from "../hooks";
 import { Icon } from "../components/icons";
+import { uploadResearchBrainSource } from "../hooks/useResearchBrain";
 
 interface LibraryPageProps {
   path?: string;
@@ -21,6 +23,22 @@ function formatSize(bytes?: number): string {
 
 export function LibraryPage({ coralGptMode = false }: LibraryPageProps) {
   const { papers, isLoading, error, refetch } = useLibraryList();
+  const [uploadError, setUploadError] = useState("");
+  const [isUploading, setIsUploading] = useState(false);
+
+  const handleUpload = async (file?: File) => {
+    if (!file) return;
+    setIsUploading(true);
+    setUploadError("");
+    try {
+      await uploadResearchBrainSource(file);
+      await refetch();
+    } catch (err: any) {
+      setUploadError(err?.message || "No se pudo cargar el paper");
+    } finally {
+      setIsUploading(false);
+    }
+  };
 
   return (
     <div className="library-page">
@@ -35,6 +53,10 @@ export function LibraryPage({ coralGptMode = false }: LibraryPageProps) {
           <Icon name="messageSquare" size={16} />
           <span>Ir al chat</span>
         </button>
+        <button className="library-link-btn" onClick={() => route("/brain")}>
+          <Icon name="brainCircuit" size={16} />
+          <span>Research Brain</span>
+        </button>
       </header>
 
       <main className="library-main">
@@ -44,6 +66,22 @@ export function LibraryPage({ coralGptMode = false }: LibraryPageProps) {
             Papers ingestados en la base de conocimiento. Abrí uno para leerlo y
             hacer preguntas respondidas solo con su contenido.
           </p>
+        </div>
+
+        <div className="brain-upload-row">
+          <label className="library-link-btn brain-upload-btn">
+            <Icon name="upload" size={16} />
+            <span>{isUploading ? "Cargando…" : "Subir paper"}</span>
+            <input
+              type="file"
+              accept=".pdf,.md,.txt,.docx"
+              disabled={isUploading}
+              onChange={(e) =>
+                handleUpload((e.target as HTMLInputElement).files?.[0])
+              }
+            />
+          </label>
+          {uploadError && <span className="brain-error">{uploadError}</span>}
         </div>
 
         {isLoading && <div className="library-state">Cargando papers…</div>}

@@ -6,7 +6,7 @@ import { usePrivy } from '@privy-io/react-auth';
 import { CDPProvider } from './providers/CDPProvider';
 import { CoralPrivyProvider } from './providers/PrivyProvider';
 import { AuthProvider } from './contexts';
-import { LoginPage, ChatPage, LandingPage, AccessPendingPage, LibraryPage, PaperPage } from './pages';
+import { LoginPage, ChatPage, LandingPage, AccessPendingPage, LibraryPage, PaperPage, ResearchBrainPage } from './pages';
 import { useAuth } from './hooks';
 import './styles/global.css';
 import './styles/coralgpt.css';
@@ -67,6 +67,7 @@ function LegacyAppShell() {
       <ChatPage path="/chat/:sessionId?" />
       <LibraryPage path="/library" />
       <PaperPage path="/library/:docId" />
+      <ResearchBrainPage path="/brain" />
       <Redirect path="/" to="/chat" />
       <NotFound default redirectTo="/chat" />
     </Router>
@@ -111,6 +112,7 @@ function CoralAppShell() {
       <ChatPage path="/chat/:sessionId?" coralGptMode privyLogout={privyLogout} />
       <LibraryPage path="/library" coralGptMode />
       <PaperPage path="/library/:docId" coralGptMode />
+      <ResearchBrainPage path="/brain" coralGptMode />
       <NotFound default redirectTo="/" />
     </Router>
   );

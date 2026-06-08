@@ -9,3 +9,4 @@ export { LandingPage } from './LandingPage';
 export { AccessPendingPage } from './AccessPendingPage';
 export { LibraryPage } from './LibraryPage';
 export { PaperPage } from './PaperPage';
+export { ResearchBrainPage } from './ResearchBrainPage';

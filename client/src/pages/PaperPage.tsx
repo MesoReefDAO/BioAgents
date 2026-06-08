@@ -4,6 +4,7 @@ import { marked } from "marked";
 import DOMPurify from "dompurify";
 import { askPaper, getPaperHistory, usePaperMeta, type AskSource } from "../hooks";
 import { Icon } from "../components/icons";
+import { useResearchBrainChunk, useResearchBrainClaims } from "../hooks/useResearchBrain";
 
 interface PaperPageProps {
   path?: string;
@@ -25,19 +26,41 @@ function renderMarkdown(text: string): string {
   return DOMPurify.sanitize(marked.parse(text) as string);
 }
 
+function readFocusedFragmentFromUrl(): number | null {
+  const params = new URLSearchParams(window.location.search);
+  const raw =
+    params.get("fragmento") ||
+    params.get("fragment") ||
+    window.location.hash.match(/fragmento?-(\d+)/i)?.[1] ||
+    window.location.hash.match(/chunk-(\d+)/i)?.[1];
+  if (!raw) return null;
+  const value = Number(raw);
+  return Number.isFinite(value) ? value : null;
+}
+
 export function PaperPage({ docId, coralGptMode = false }: PaperPageProps) {
   const { meta, isLoading, error } = usePaperMeta(docId);
+  const { claims, isLoading: claimsLoading } = useResearchBrainClaims(
+    meta?.researchSourceId,
+  );
   const [turns, setTurns] = useState<ChatTurn[]>([]);
   const [input, setInput] = useState("");
   const [fullContext, setFullContext] = useState(false);
   const [isAsking, setIsAsking] = useState(false);
   const [askError, setAskError] = useState("");
   const [activeSource, setActiveSource] = useState<string | null>(null);
+  const [focusedFragment, setFocusedFragment] = useState<number | null>(null);
+  const {
+    chunk: focusedChunk,
+    isLoading: focusedChunkLoading,
+    error: focusedChunkError,
+  } = useResearchBrainChunk(meta?.researchSourceId, focusedFragment);
   const messagesRef = useRef<HTMLDivElement>(null);
 
   // Load persisted history for this paper on open.
   useEffect(() => {
     if (!docId) return;
+    setFocusedFragment(readFocusedFragmentFromUrl());
     let cancelled = false;
     (async () => {
       const history = await getPaperHistory(docId);
@@ -51,11 +74,26 @@ export function PaperPage({ docId, coralGptMode = false }: PaperPageProps) {
     };
   }, [docId]);
 
+  const focusedClaim =
+    focusedFragment == null
+      ? null
+      : claims.find(
+          (claim) => Number(claim.chunk?.chunk_index) === focusedFragment,
+        ) || null;
+  const focusedEvidenceContent =
+    focusedClaim?.chunk?.content || focusedChunk?.content || "";
+  const focusedEvidencePage = focusedClaim?.chunk?.page || focusedChunk?.page;
+
   const fullContextTooBig =
     meta?.estTokens != null && meta.estTokens > FULL_CONTEXT_TOKEN_LIMIT;
 
   const canEmbed =
     meta?.type === "pdf" || meta?.type === "md" || meta?.type === "txt";
+
+  const viewerSrc =
+    meta?.fileUrl && focusedEvidencePage
+      ? `${meta.fileUrl}#page=${focusedEvidencePage}`
+      : meta?.fileUrl;
 
   const scrollToBottom = () => {
     requestAnimationFrame(() => {
@@ -123,11 +161,59 @@ export function PaperPage({ docId, coralGptMode = false }: PaperPageProps) {
         <div className="paper-split">
           {/* Viewer */}
           <section className="paper-viewer">
+            {focusedFragment != null && (
+              <div className="paper-evidence-focus">
+                <div className="paper-evidence-focus-header">
+                  <span>Fragmento {focusedFragment}</span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setFocusedFragment(null);
+                      if (docId) route(`/library/${docId}`, true);
+                    }}
+                    aria-label="Cerrar fragmento enfocado"
+                  >
+                    ×
+                  </button>
+                </div>
+                {focusedClaim ? (
+                  <>
+                    <p className="paper-evidence-focus-claim">
+                      {focusedClaim.claim}
+                    </p>
+                    {focusedEvidenceContent && (
+                      <blockquote>
+                        {focusedEvidenceContent.slice(0, 900)}
+                        {focusedEvidenceContent.length > 900 ? "…" : ""}
+                      </blockquote>
+                    )}
+                  </>
+                ) : focusedChunkLoading ? (
+                  <p className="paper-evidence-focus-empty">
+                    Cargando fragmento…
+                  </p>
+                ) : focusedEvidenceContent ? (
+                  <blockquote>
+                    {focusedEvidenceContent.slice(0, 1100)}
+                    {focusedEvidenceContent.length > 1100 ? "…" : ""}
+                  </blockquote>
+                ) : focusedChunkError ? (
+                  <p className="paper-evidence-focus-empty">
+                    No pude cargar ese fragmento: {focusedChunkError}
+                  </p>
+                ) : (
+                  <p className="paper-evidence-focus-empty">
+                    El fragmento está seleccionado, pero no encontré texto
+                    asociado en Research Brain.
+                  </p>
+                )}
+              </div>
+            )}
             {isLoading && <div className="library-state">Cargando…</div>}
             {!isLoading && meta && canEmbed && (
               <iframe
                 className="paper-iframe"
-                src={meta.fileUrl}
+                src={viewerSrc}
                 title={meta.title}
               />
             )}
@@ -169,6 +255,29 @@ export function PaperPage({ docId, coralGptMode = false }: PaperPageProps) {
                 )}
               </div>
             </div>
+
+            {meta?.researchSourceId && (
+              <div className="paper-claims-strip">
+                <div className="paper-claims-strip-title">
+                  <Icon name="brainCircuit" size={15} />
+                  <span>Claims extraídos</span>
+                </div>
+                {claimsLoading && <span>Cargando claims…</span>}
+                {!claimsLoading && claims.length === 0 && (
+                  <span>No hay claims extraídos todavía.</span>
+                )}
+                {!claimsLoading && claims.length > 0 && (
+                  <div className="paper-claims-mini-list">
+                    {claims.slice(0, 4).map((claim) => (
+                      <div key={claim.id} className="paper-claim-mini">
+                        <span>{claim.status}</span>
+                        <p>{claim.claim}</p>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
 
             <div className="paper-chat-messages" ref={messagesRef}>
               {turns.length === 0 && (

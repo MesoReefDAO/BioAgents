@@ -36,6 +36,12 @@ interface PlanStep {
   artifacts?: AnalysisArtifact[];
 }
 
+interface ResearchEvidenceItem {
+  claim: string;
+  sourceTitle?: string;
+  status?: string;
+}
+
 interface ResearchState {
   plan?: PlanStep[];
   discoveries?: string[];
@@ -44,6 +50,12 @@ interface ResearchState {
   currentObjective?: string;
   uploadedDatasets?: Dataset[];
   currentHypothesis?: string;
+  researchBrainEvidence?: {
+    supportedClaims?: ResearchEvidenceItem[];
+    partialClaims?: ResearchEvidenceItem[];
+    contradictions?: ResearchEvidenceItem[];
+    openQuestions?: ResearchEvidenceItem[];
+  };
 }
 
 interface Props {
@@ -68,6 +80,7 @@ export function ResearchStatePanel({
     methodology: false,
     datasets: false,
     plan: false,
+    brain: true,
   });
 
   // Track which step outputs are expanded
@@ -191,6 +204,43 @@ export function ResearchStatePanel({
               <p className="research-objective-text">
                 {state?.currentObjective}
               </p>
+            </div>
+          )}
+
+          {state?.researchBrainEvidence && (
+            <div className="research-section">
+              <button
+                className="research-section-toggle"
+                onClick={() => toggleSection("brain")}
+              >
+                <div className="research-section-toggle-left">
+                  <Icon name="brainCircuit" size={14} />
+                  <span>Research Brain Evidence</span>
+                </div>
+                <Icon
+                  name="chevronDown"
+                  size={14}
+                  className={`research-section-chevron ${expandedSections.brain ? "expanded" : ""}`}
+                />
+              </button>
+              {expandedSections.brain && (
+                <div className="research-section-body">
+                  <ul className="research-insights-list">
+                    {[
+                      ...(state.researchBrainEvidence.supportedClaims || []),
+                      ...(state.researchBrainEvidence.partialClaims || []),
+                      ...(state.researchBrainEvidence.contradictions || []),
+                      ...(state.researchBrainEvidence.openQuestions || []),
+                    ].slice(0, 6).map((claim, i) => (
+                      <li key={i} className="research-insight-item">
+                        <strong>{claim.status || "evidence"}:</strong>{" "}
+                        {claim.claim}
+                        {claim.sourceTitle ? ` (${claim.sourceTitle})` : ""}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
             </div>
           )}
 

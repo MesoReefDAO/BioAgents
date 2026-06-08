@@ -26,6 +26,7 @@ export interface StateValues {
   // Action responses
   finalResponse?: string; // Final text response from REPLY or HYPOTHESIS
   thought?: string;
+  researchBrainEvidence?: any;
 
   // Step tracking
   steps?: Record<string, { start: number; end?: number }>;
@@ -116,6 +117,7 @@ export interface ConversationStateValues extends StateValues {
   suggestedNextSteps?: Array<PlanTask>; // Suggestions for next iteration (from "next" planning mode)
   currentActivity?: DeepResearchActivity; // Compact top-level activity shown in the main deep research view
   objectiveTrace?: DeepResearchObjectiveTrace; // Synthetic objective breakdown shown in the main loader
+  researchBrainEvidence?: any; // Evidence pack from Research Brain used to ground planning/replies
   researchMode?: "semi-autonomous" | "fully-autonomous" | "steering"; // Research iteration mode (can change per request)
   uploadedDatasets?: Array<{
     filename: string;

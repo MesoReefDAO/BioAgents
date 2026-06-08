@@ -107,10 +107,19 @@ export function InlineCitationText({ content }) {
   const handleCitationClick = (citation, e) => {
     e.preventDefault();
     if (citation.urls.length === 1) {
-      window.open(citation.urls[0], '_blank', 'noopener,noreferrer');
+      const url = citation.urls[0];
+      if (url.startsWith('/')) {
+        window.location.assign(url);
+      } else {
+        window.open(url, '_blank', 'noopener,noreferrer');
+      }
     } else if (citation.urls.length > 1) {
       citation.urls.forEach(url => {
-        window.open(url, '_blank', 'noopener,noreferrer');
+        if (url.startsWith('/')) {
+          window.location.assign(url);
+        } else {
+          window.open(url, '_blank', 'noopener,noreferrer');
+        }
       });
     }
   };
@@ -140,10 +149,14 @@ export function InlineCitationText({ content }) {
 
       const firstUrl = citation.urls[0];
       let domainName = String(citation.index);
-      try {
-        domainName = extractDomainName(new URL(firstUrl).hostname);
-      } catch {
-        // Use index if URL parsing fails
+      if (firstUrl.startsWith('/library/')) {
+        domainName = 'Biblioteca';
+      } else {
+        try {
+          domainName = extractDomainName(new URL(firstUrl).hostname);
+        } catch {
+          // Use index if URL parsing fails
+        }
       }
 
       button.title = `View source: ${domainName}${citation.urls.length > 1 ? ` (+${citation.urls.length - 1})` : ''}`;
@@ -194,7 +207,9 @@ export function InlineCitationText({ content }) {
               <div className="citation-preview-icon">
                 {(() => {
                   try {
-                    const hostname = new URL(hoveredCitation.urls[currentSourceIndex]).hostname;
+                    const currentUrl = hoveredCitation.urls[currentSourceIndex];
+                    if (currentUrl.startsWith('/library/')) return 'B';
+                    const hostname = new URL(currentUrl).hostname;
                     const domainName = extractDomainName(hostname);
                     return domainName.charAt(0).toUpperCase();
                   } catch {
@@ -206,7 +221,9 @@ export function InlineCitationText({ content }) {
                 <p className="citation-preview-domain">
                   {(() => {
                     try {
-                      const hostname = new URL(hoveredCitation.urls[currentSourceIndex]).hostname;
+                      const currentUrl = hoveredCitation.urls[currentSourceIndex];
+                      if (currentUrl.startsWith('/library/')) return 'Biblioteca';
+                      const hostname = new URL(currentUrl).hostname;
                       return extractDomainName(hostname);
                     } catch {
                       return 'Source';
@@ -216,7 +233,9 @@ export function InlineCitationText({ content }) {
                 <p className="citation-preview-url">
                   {(() => {
                     try {
-                      return new URL(hoveredCitation.urls[currentSourceIndex]).hostname;
+                      const currentUrl = hoveredCitation.urls[currentSourceIndex];
+                      if (currentUrl.startsWith('/library/')) return currentUrl;
+                      return new URL(currentUrl).hostname;
                     } catch {
                       return hoveredCitation.urls[currentSourceIndex];
                     }

@@ -16,6 +16,9 @@ import type {
   FileProcessJobResult,
   PaperGenerationJobData,
   PaperGenerationJobResult,
+  DocumentIngestionJobData,
+  DocumentIngestionJobResult,
+  BioprospectingJobData,
 } from "./types";
 import logger from "../../utils/logger";
 
@@ -24,6 +27,8 @@ let chatQueueInstance: Queue<ChatJobData, ChatJobResult> | null = null;
 let deepResearchQueueInstance: Queue<DeepResearchJobData, DeepResearchJobResult> | null = null;
 let fileProcessQueueInstance: Queue<FileProcessJobData, FileProcessJobResult> | null = null;
 let paperGenerationQueueInstance: Queue<PaperGenerationJobData, PaperGenerationJobResult> | null = null;
+let documentIngestionQueueInstance: Queue<DocumentIngestionJobData, DocumentIngestionJobResult> | null = null;
+let bioprospectingQueueInstance: Queue<BioprospectingJobData, any> | null = null;
 
 /**
  * Get or create the chat queue
@@ -185,10 +190,93 @@ export function getPaperGenerationQueue(): Queue<PaperGenerationJobData, PaperGe
 }
 
 /**
+ * Get or create the document ingestion queue
+ * Processes individual files from a directory ingestion run
+ *
+ * Retry config:
+ * - 3 attempts with exponential backoff (1s → 2s → 4s)
+ * - 2 minute lock duration
+ */
+export function getDocumentIngestionQueue(): Queue<DocumentIngestionJobData, DocumentIngestionJobResult> {
+  if (!isJobQueueEnabled()) {
+    throw new Error("Job queue is not enabled. Set USE_JOB_QUEUE=true to use queues.");
+  }
+
+  if (!documentIngestionQueueInstance) {
+    documentIngestionQueueInstance = new Queue<DocumentIngestionJobData, DocumentIngestionJobResult>("document-ingestion", {
+      connection: getBullMQConnection(),
+      defaultJobOptions: {
+        attempts: 3,
+        backoff: {
+          type: "exponential",
+          delay: 1000,
+        },
+        removeOnComplete: {
+          age: 3600,
+          count: 500,
+        },
+        removeOnFail: {
+          age: 86400,
+        },
+      },
+    });
+
+    logger.info({ queue: "document-ingestion" }, "document_ingestion_queue_initialized");
+  }
+
+  return documentIngestionQueueInstance;
+}
+
+/**
+ * Get or create the bioprospecting queue
+ * Extracts bioprospecting facts from processed sources
+ *
+ * Retry config:
+ * - 3 attempts with exponential backoff (1s → 2s → 4s)
+ * - No timeout (LLM calls can be slow)
+ */
+export function getBioprospectingQueue(): Queue<BioprospectingJobData, any> {
+  if (!isJobQueueEnabled()) {
+    throw new Error("Job queue is not enabled. Set USE_JOB_QUEUE=true to use queues.");
+  }
+
+  if (!bioprospectingQueueInstance) {
+    bioprospectingQueueInstance = new Queue<BioprospectingJobData, any>("bioprospecting", {
+      connection: getBullMQConnection(),
+      defaultJobOptions: {
+        attempts: 3,
+        backoff: {
+          type: "exponential",
+          delay: 1000,
+        },
+        removeOnComplete: {
+          age: 3600,
+          count: 500,
+        },
+        removeOnFail: {
+          age: 86400,
+        },
+      },
+    });
+
+    logger.info({ queue: "bioprospecting" }, "bioprospecting_queue_initialized");
+  }
+
+  return bioprospectingQueueInstance;
+}
+
+/**
  * Close all queue instances (for graceful shutdown)
  */
 export async function closeQueues(): Promise<void> {
-  const queues = [chatQueueInstance, deepResearchQueueInstance, fileProcessQueueInstance, paperGenerationQueueInstance];
+  const queues = [
+    chatQueueInstance,
+    deepResearchQueueInstance,
+    fileProcessQueueInstance,
+    paperGenerationQueueInstance,
+    documentIngestionQueueInstance,
+    bioprospectingQueueInstance,
+  ];
 
   await Promise.all(
     queues
@@ -200,6 +288,8 @@ export async function closeQueues(): Promise<void> {
   deepResearchQueueInstance = null;
   fileProcessQueueInstance = null;
   paperGenerationQueueInstance = null;
+  documentIngestionQueueInstance = null;
+  bioprospectingQueueInstance = null;
 
   logger.info("queues_closed");
 }

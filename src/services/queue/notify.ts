@@ -10,7 +10,7 @@
  */
 
 import { getPublisher } from "./connection";
-import type { Notification, NotificationType } from "./types";
+import type { Notification, NotificationType, IngestionProgressNotification } from "./types";
 import logger from "../../utils/logger";
 
 /**
@@ -47,6 +47,95 @@ export async function notify(notification: Notification): Promise<void> {
       "notification_publish_failed",
     );
   }
+}
+
+/**
+ * Publish an ingestion notification to Redis Pub/Sub
+ * Uses runId-based channel routing (not conversationId)
+ */
+export async function notifyIngestion(notification: IngestionProgressNotification): Promise<void> {
+  try {
+    const publisher = getPublisher();
+    const channel = `run:${notification.runId}`;
+
+    await publisher.publish(channel, JSON.stringify(notification));
+
+    logger.info(
+      {
+        type: notification.type,
+        runId: notification.runId,
+        channel,
+      },
+      "ingestion_notification_published",
+    );
+  } catch (error) {
+    logger.error(
+      { err: error, notification },
+      "ingestion_notification_publish_failed",
+    );
+  }
+}
+
+/**
+ * Helper to create and send an ingestion:started notification
+ */
+export async function notifyIngestionStarted(runId: string, totalFiles: number): Promise<void> {
+  await notifyIngestion({
+    type: "ingestion:started",
+    runId,
+    progress: { processed: 0, skipped: 0, failed: 0, total: totalFiles },
+  });
+}
+
+/**
+ * Helper to create and send an ingestion:progress notification
+ */
+export async function notifyIngestionProgress(
+  runId: string,
+  filePath: string,
+  status: "processing" | "processed" | "skipped" | "failed",
+  progress: { processed: number; skipped: number; failed: number; total: number },
+  error?: string,
+): Promise<void> {
+  await notifyIngestion({
+    type: "ingestion:progress",
+    runId,
+    filePath,
+    status,
+    progress,
+    error,
+  });
+}
+
+/**
+ * Helper to create and send an ingestion:completed notification
+ */
+export async function notifyIngestionCompleted(
+  runId: string,
+  progress: { processed: number; skipped: number; failed: number; total: number },
+): Promise<void> {
+  await notifyIngestion({
+    type: "ingestion:completed",
+    runId,
+    status: "processed",
+    progress,
+  });
+}
+
+/**
+ * Helper to create and send an ingestion:failed notification
+ */
+export async function notifyIngestionFailed(
+  runId: string,
+  error: string,
+  progress?: { processed: number; skipped: number; failed: number; total: number },
+): Promise<void> {
+  await notifyIngestion({
+    type: "ingestion:failed",
+    runId,
+    error,
+    progress,
+  });
 }
 
 /**

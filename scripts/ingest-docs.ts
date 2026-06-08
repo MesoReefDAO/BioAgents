@@ -1,5 +1,9 @@
 import "dotenv/config";
 import { VectorSearchWithDocuments } from "../src/embeddings/vectorSearchWithDocs";
+import { getDocumentIngestionQueue } from "../src/services/queue/queues";
+import { isJobQueueEnabled } from "../src/services/queue/connection";
+import { DocumentProcessor } from "../src/embeddings/documentProcessor";
+import { getServiceClient } from "../src/db/client";
 
 function readArg(name: string): string | undefined {
   const prefix = `--${name}=`;
@@ -40,6 +44,7 @@ async function main() {
         extractBioprospecting,
         registerExisting,
         ignorePatterns,
+        useJobQueue: isJobQueueEnabled(),
       },
       null,
       2,
@@ -47,6 +52,7 @@ async function main() {
   );
 
   const vectorSearch = new VectorSearchWithDocuments();
+
   if (dryRun) {
     const report = await vectorSearch.dryRunIngestDirectory(docsPath, {
       force,
@@ -57,6 +63,73 @@ async function main() {
     return;
   }
 
+  // When USE_JOB_QUEUE=true, enqueue jobs instead of sequential processing
+  if (isJobQueueEnabled()) {
+    const supabase = getServiceClient();
+    const documentProcessor = new DocumentProcessor();
+
+    // List all files
+    const files = await documentProcessor.listSupportedFiles(docsPath, {
+      ignorePatterns: ignorePatterns.length > 0 ? ignorePatterns : undefined,
+    });
+
+    if (files.length === 0) {
+      console.log("No supported files found in directory");
+      return;
+    }
+
+    // Create ingestion run record
+    const { data, error } = await supabase
+      .from("research_ingestion_runs")
+      .insert({
+        docs_path: docsPath,
+        status: "running",
+        total_files: files.length,
+        metadata: {
+          force,
+          extractBioprospecting,
+ },
+      })
+      .select("id")
+      .single();
+
+    if (error) {
+      console.error("Failed to create ingestion run:", error);
+      process.exit(1);
+    }
+
+    const runId = (data as any).id;
+    console.log(`Created ingestion run: ${runId}`);
+
+    // Enqueue jobs for each file
+    const queue = getDocumentIngestionQueue();
+    for (const filePath of files) {
+      await queue.add("document-ingestion", {
+        runId,
+        filePath,
+        options: {
+          force,
+          extractBioprospecting,
+        },
+      });
+    }
+
+    console.log(`Enqueued ${files.length} ingestion jobs`);
+    console.log(
+      JSON.stringify(
+        {
+          runId,
+          status: "running",
+          totalFiles: files.length,
+        },
+        null,
+        2,
+      ),
+    );
+    return;
+  }
+
+  // When USE_JOB_QUEUE=false, use existing sequential behavior
   const result = await vectorSearch.ingestDirectory(docsPath, {
     force,
     registerExisting,

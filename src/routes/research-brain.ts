@@ -18,6 +18,10 @@ import {
   updateBioprospectingFactReview,
   updateBioprospectingFactsReviewBulk,
 } from "../services/researchBrain";
+import { getServiceClient } from "../db/client";
+import { getDocumentIngestionQueue } from "../services/queue/queues";
+import { isJobQueueEnabled } from "../services/queue/connection";
+import { DocumentProcessor } from "../embeddings/documentProcessor";
 import logger from "../utils/logger";
 
 function getDocsPath(): string {
@@ -566,6 +570,251 @@ export const researchBrainRoute = new Elysia({ prefix: "/api/research-brain" })
       }
     },
     { beforeHandle: authResolver({ required: true }) },
+  )
+  .post(
+    "/ingestion/start",
+    async ({ body, set }) => {
+      const parsed = (body || {}) as {
+        docsPath?: string;
+        options?: {
+          force?: boolean;
+          extractBioprospecting?: boolean;
+        };
+      };
+
+      if (!parsed.docsPath) {
+        set.status = 400;
+        return { error: "Missing docsPath" };
+      }
+
+      const docsPath = path.resolve(parsed.docsPath);
+      const force = parsed.options?.force ?? false;
+      const extractBioprospecting = parsed.options?.extractBioprospecting ?? false;
+
+      // Check if directory exists and is accessible
+      try {
+        await mkdir(docsPath, { recursive: true });
+      } catch {
+        set.status = 400;
+        return { error: "Directory not accessible" };
+      }
+
+      const supabase = getServiceClient();
+
+      // List all files in the directory
+      const documentProcessor = new DocumentProcessor();
+      const ignorePatterns = (process.env.KNOWLEDGE_INGEST_IGNORE || "research-brain.md")
+        .split(",")
+        .map((p) => p.trim())
+        .filter((p) => p.length > 0);
+
+      let files: string[] = [];
+      try {
+        files = await documentProcessor.listSupportedFiles(docsPath, { ignorePatterns });
+      } catch {
+        set.status = 400;
+        return { error: "Directory not accessible" };
+      }
+
+      if (files.length === 0) {
+        set.status = 400;
+        return { error: "No supported files found in directory" };
+      }
+
+      // Create ingestion run record
+      let runId: string | null = null;
+      try {
+        const { data, error } = await supabase
+          .from("research_ingestion_runs")
+          .insert({
+            docs_path: docsPath,
+            status: "running",
+            total_files: files.length,
+            metadata: {
+              force,
+              extractBioprospecting,
+            },
+          })
+          .select("id")
+          .single();
+
+        if (error) throw error;
+        runId = (data as any).id;
+      } catch (error: any) {
+        logger.error({ err: error }, "ingestion_start_run_create_failed");
+        set.status = 500;
+        return { error: "Failed to create ingestion run", message: error?.message };
+      }
+
+      // If job queue is disabled, return error (sequential mode not supported for API)
+      if (!isJobQueueEnabled()) {
+        set.status = 400;
+        return { error: "Job queue is not enabled. Set USE_JOB_QUEUE=true to use ingestion API." };
+      }
+
+      // Enqueue jobs for each file
+      try {
+        const queue = getDocumentIngestionQueue();
+        for (const filePath of files) {
+          await queue.add("document-ingestion", {
+            runId,
+            filePath,
+            options: {
+              force,
+              extractBioprospecting,
+            },
+          });
+        }
+
+        logger.info({ runId, fileCount: files.length }, "ingestion_jobs_enqueued");
+      } catch (error: any) {
+        logger.error({ err: error, runId }, "ingestion_jobs_enqueue_failed");
+        set.status = 500;
+        return { error: "Failed to enqueue ingestion jobs", message: error?.message };
+      }
+
+      return {
+        runId,
+        status: "running",
+        totalFiles: files.length,
+      };
+    },
+    { beforeHandle: authResolver({ required: false }) },
+  )
+  .get(
+    "/ingestion/runs/:id",
+    async ({ params, set }) => {
+      const supabase = getServiceClient();
+
+      try {
+        const { data: run, error } = await supabase
+          .from("research_ingestion_runs")
+          .select("*")
+          .eq("id", params.id)
+          .single();
+
+        if (error || !run) {
+          set.status = 404;
+          return { error: "Run not found" };
+        }
+
+        return {
+          runId: (run as any).id,
+          docsPath: (run as any).docs_path,
+          status: (run as any).status,
+          totalFiles: (run as any).total_files,
+          processedFiles: (run as any).processed_files,
+          skippedFiles: (run as any).skipped_files,
+          failedFiles: (run as any).failed_files,
+          startedAt: (run as any).started_at,
+          finishedAt: (run as any).finished_at,
+        };
+      } catch (error: any) {
+        logger.error({ err: error, runId: params.id }, "ingestion_run_status_failed");
+        set.status = 500;
+        return { error: "Failed to get run status", message: error?.message };
+      }
+    },
+    { beforeHandle: authResolver({ required: false }) },
+  )
+  .get(
+    "/ingestion/runs/:id/files",
+    async ({ params, set }) => {
+      const supabase = getServiceClient();
+
+      try {
+        const { data: run, error } = await supabase
+          .from("research_ingestion_runs")
+          .select("file_statuses")
+          .eq("id", params.id)
+          .single();
+
+        if (error || !run) {
+          set.status = 404;
+          return { error: "Run not found" };
+        }
+
+        const fileStatuses: any[] = (run as any).file_statuses || [];
+
+        return {
+          runId: params.id,
+          files: fileStatuses.map((f) => ({
+            filePath: f.filePath,
+            status: f.status,
+            chunksInserted: f.chunksInserted,
+            sourceId: f.sourceId,
+            error: f.error,
+            reason: f.reason,
+          })),
+        };
+      } catch (error: any) {
+        logger.error({ err: error, runId: params.id }, "ingestion_run_files_failed");
+        set.status = 500;
+        return { error: "Failed to get file statuses", message: error?.message };
+      }
+    },
+    { beforeHandle: authResolver({ required: false }) },
+  )
+  .post(
+    "/ingestion/runs/:id/retry-failed",
+    async ({ params, set }) => {
+      const supabase = getServiceClient();
+
+      // Get the run and filter for failed files
+      const { data: run, error: runError } = await supabase
+        .from("research_ingestion_runs")
+        .select("file_statuses, metadata")
+        .eq("id", params.id)
+        .single();
+
+      if (runError || !run) {
+        set.status = 404;
+        return { error: "Run not found" };
+      }
+
+      const fileStatuses: any[] = (run as any).file_statuses || [];
+      const failedFiles = fileStatuses.filter((f) => f.status === "failed");
+
+      if (failedFiles.length === 0) {
+        return {
+          runId: params.id,
+          retriedFiles: 0,
+          status: (run as any).status,
+        };
+      }
+
+      // Update run status to running
+      await supabase
+        .from("research_ingestion_runs")
+        .update({ status: "running" })
+        .eq("id", params.id);
+
+      // Re-enqueue failed jobs
+      if (isJobQueueEnabled()) {
+        const queue = getDocumentIngestionQueue();
+        const metadata = (run as any).metadata || {};
+
+        for (const file of failedFiles) {
+          await queue.add("document-ingestion", {
+            runId: params.id,
+            filePath: file.filePath,
+            options: {
+              force: metadata.force ?? false,
+              extractBioprospecting: metadata.extractBioprospecting ?? false,
+            },
+          });
+        }
+
+        logger.info({ runId: params.id, retriedFiles: failedFiles.length }, "ingestion_retry_failed_enqueued");
+      }
+
+      return {
+        runId: params.id,
+        retriedFiles: failedFiles.length,
+        status: "running",
+      };
+    },
+    { beforeHandle: authResolver({ required: false }) },
   );
 
 export default researchBrainRoute;

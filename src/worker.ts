@@ -15,6 +15,8 @@ import { startChatWorker } from "./services/queue/workers/chat.worker";
 import { startDeepResearchWorker } from "./services/queue/workers/deep-research.worker";
 import { createFileProcessWorker } from "./services/queue/workers/file-process.worker";
 import { startPaperGenerationWorker } from "./services/queue/workers/paper-generation.worker";
+import { createDocumentIngestionWorker } from "./services/queue/workers/document-ingestion.worker";
+import { createBioprospectingWorker } from "./services/queue/workers/bioprospecting.worker";
 import { closeConnections } from "./services/queue/connection";
 import logger from "./utils/logger";
 
@@ -26,6 +28,8 @@ async function main() {
   const deepResearchWorker = startDeepResearchWorker();
   const fileProcessWorker = createFileProcessWorker();
   const paperGenerationWorker = startPaperGenerationWorker();
+  const documentIngestionWorker = createDocumentIngestionWorker();
+  const bioprospectingWorker = createBioprospectingWorker();
 
   logger.info(
     {
@@ -33,6 +37,8 @@ async function main() {
       deepResearchConcurrency: process.env.DEEP_RESEARCH_QUEUE_CONCURRENCY || 3,
       fileProcessConcurrency: process.env.FILE_PROCESS_CONCURRENCY || 5,
       paperGenerationConcurrency: process.env.PAPER_GENERATION_CONCURRENCY || 1,
+      documentIngestionConcurrency: process.env.DOCUMENT_INGESTION_CONCURRENCY || 2,
+      bioprospectingConcurrency: process.env.BIOPROSPECTING_CONCURRENCY || 1,
       redisUrl: process.env.REDIS_URL ? "[REDACTED]" : "redis://localhost:6379",
     },
     "workers_started",
@@ -49,6 +55,8 @@ async function main() {
       deepResearchWorker.close().then(() => logger.info("deep_research_worker_closed")),
       fileProcessWorker.close().then(() => logger.info("file_process_worker_closed")),
       paperGenerationWorker.close().then(() => logger.info("paper_generation_worker_closed")),
+      documentIngestionWorker.close().then(() => logger.info("document_ingestion_worker_closed")),
+      bioprospectingWorker.close().then(() => logger.info("bioprospecting_worker_closed")),
     ];
 
     logger.info("waiting_for_all_workers_to_finish_current_jobs");

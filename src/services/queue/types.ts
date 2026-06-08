@@ -172,7 +172,74 @@ export type NotificationType =
   | "paper:started"
   | "paper:progress"
   | "paper:completed"
-  | "paper:failed";
+  | "paper:failed"
+  | "ingestion:started"
+  | "ingestion:progress"
+  | "ingestion:completed"
+  | "ingestion:failed";
+
+/**
+ * Job data for document ingestion queue
+ * Processes a single file: parse, chunk, embed, register with research brain
+ */
+export interface DocumentIngestionJobData {
+  runId: string;
+  filePath: string;
+  options: {
+    force?: boolean;
+    extractBioprospecting?: boolean;
+  };
+}
+
+/**
+ * Result returned by document ingestion worker on completion
+ */
+export interface DocumentIngestionJobResult {
+  filePath: string;
+  status: "processed" | "skipped" | "failed";
+  chunksInserted?: number;
+  sourceId?: string;
+  error?: string;
+}
+
+/**
+ * Job data for bioprospecting queue
+ * Extracts bioprospecting facts from a processed source
+ */
+export interface BioprospectingJobData {
+  runId: string;
+  sourceId: string;
+  options?: {
+    maxChunks?: number;
+    batchSize?: number;
+  };
+}
+
+/**
+ * Ingestion notification types sent via Redis Pub/Sub
+ */
+export type IngestionNotificationType =
+  | "ingestion:started"
+  | "ingestion:progress"
+  | "ingestion:completed"
+  | "ingestion:failed";
+
+/**
+ * Ingestion progress notification payload
+ */
+export interface IngestionProgressNotification {
+  type: IngestionNotificationType;
+  runId: string;
+  filePath?: string;
+  status?: "processing" | "processed" | "skipped" | "failed";
+  progress?: {
+    processed: number;
+    skipped: number;
+    failed: number;
+    total: number;
+  };
+  error?: string;
+}
 
 /**
  * Notification payload structure
@@ -186,6 +253,7 @@ export interface Notification {
   stateId?: string;
   fileId?: string;
   paperId?: string;
+  runId?: string;
   progress?: { stage: string; percent: number };
   description?: string;
   error?: string;

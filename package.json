@@ -1,17 +1,22 @@
 {
   "name": "bioagents-openai-agentkit",
-  "module": "index.ts",
-  "type": "module",
   "private": true,
-  "devDependencies": {
-    "@types/archiver": "^7.0.0",
-    "@types/bun": "latest",
-    "prettier": "^3.6.2",
-    "prettier-plugin-organize-imports": "^4.3.0",
-    "prettier-plugin-packagejson": "^2.5.19"
-  },
-  "peerDependencies": {
-    "typescript": "^5"
+  "type": "module",
+  "module": "index.ts",
+  "scripts": {
+    "build": "bun run build:client",
+    "build:client": "bun run client/build.ts",
+    "dev": "bun --watch src/index.ts",
+    "extract:bioprospecting": "bun run scripts/extract-bioprospecting.ts",
+    "ingest:docs": "bun run scripts/ingest-docs.ts",
+    "migrate": "supabase migration up",
+    "migrate:new": "supabase migration new",
+    "normalize:measurements": "bun run scripts/normalize-measurements.ts",
+    "normalize:taxonomy": "bun run scripts/normalize-taxonomy.ts",
+    "redeploy": "docker compose build bioagents && docker compose up -d --force-recreate bioagents",
+    "start": "bun src/index.ts",
+    "worker": "bun src/worker.ts",
+    "worker:dev": "bun --watch src/worker.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.1.26",
@@ -67,15 +72,14 @@
     "xlsx": "^0.18.5",
     "zod": "3"
   },
-  "scripts": {
-    "dev": "bun --watch src/index.ts",
-    "start": "bun src/index.ts",
-    "worker": "bun src/worker.ts",
-    "worker:dev": "bun --watch src/worker.ts",
-    "build:client": "bun run client/build.ts",
-    "build": "bun run build:client",
-    "migrate": "supabase migration up",
-    "migrate:new": "supabase migration new",
-    "redeploy": "docker compose build bioagents && docker compose up -d --force-recreate bioagents"
+  "devDependencies": {
+    "@types/archiver": "^7.0.0",
+    "@types/bun": "latest",
+    "prettier": "^3.6.2",
+    "prettier-plugin-organize-imports": "^4.3.0",
+    "prettier-plugin-packagejson": "^2.5.19"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
   }
 }

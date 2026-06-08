@@ -222,7 +222,9 @@ export type IngestionNotificationType =
   | "ingestion:started"
   | "ingestion:progress"
   | "ingestion:completed"
-  | "ingestion:failed";
+  | "ingestion:failed"
+  | "run:llm_call"
+  | "run:cancelled";
 
 /**
  * Ingestion progress notification payload
@@ -239,6 +241,8 @@ export interface IngestionProgressNotification {
     total: number;
   };
   error?: string;
+  llmCost?: number;
+  llmCallsCount?: number;
 }
 
 /**

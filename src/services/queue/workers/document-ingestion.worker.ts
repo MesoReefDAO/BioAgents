@@ -229,9 +229,22 @@ async function getRunCounters(runId: string): Promise<{ processed: number; skipp
 
 /**
  * Enqueue a bioprospecting job for a source
+ * Checks cancelled_at before enqueuing to respect cancellation
  */
 async function enqueueBioprospectingJob(runId: string, sourceId: string): Promise<void> {
   try {
+    // Check if run was cancelled before enqueuing
+    const { data: run } = await supabase
+      .from("research_ingestion_runs")
+      .select("cancelled_at")
+      .eq("id", runId)
+      .single();
+
+    if ((run as any)?.cancelled_at) {
+      logger.info({ runId, sourceId }, "bioprospecting_job_skipped_cancelled");
+      return;
+    }
+
     const { getBioprospectingQueue } = await import("../queues");
     const queue = getBioprospectingQueue();
     await queue.add("bioprospecting", {

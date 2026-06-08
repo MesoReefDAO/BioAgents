@@ -110,6 +110,13 @@ export interface AuthResolverOptions {
    * @default true
    */
   required?: boolean;
+
+  /**
+   * Required role for authorization
+   * - 'admin': User must have role: 'admin' in JWT claims
+   * If specified and user lacks the role, returns 403
+   */
+  role?: "admin";
 }
 
 /**

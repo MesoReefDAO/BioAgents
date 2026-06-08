@@ -682,6 +682,98 @@ export const researchBrainRoute = new Elysia({ prefix: "/api/research-brain" })
     { beforeHandle: authResolver({ required: false }) },
   )
   .get(
+    "/ingestion/runs",
+    async ({ query, set }) => {
+      const supabase = getServiceClient();
+      const parsed = query as { status?: string; limit?: string; offset?: string };
+
+      const limit = Math.min(Math.max(parseInt(parsed.limit || "20", 10) || 20, 1), 100);
+      const offset = parseInt(parsed.offset || "0", 10) || 0;
+      const status = parsed.status;
+
+      try {
+        let dbQuery = supabase
+          .from("research_ingestion_runs")
+          .select("id, docs_path, status, total_files, processed_files, skipped_files, failed_files, llm_cost, started_at, finished_at, cancelled_at", { count: "exact" })
+          .order("started_at", { ascending: false })
+          .range(offset, offset + limit - 1);
+
+        if (status) {
+          dbQuery = dbQuery.eq("status", status);
+        }
+
+        const { data: runs, error, count } = await dbQuery;
+
+        if (error) throw error;
+
+        return {
+          runs: (runs || []).map((run: any) => ({
+            runId: run.id,
+            docsPath: run.docs_path,
+            status: run.status,
+            totalFiles: run.total_files,
+            processedFiles: run.processed_files,
+            skippedFiles: run.skipped_files,
+            failedFiles: run.failed_files,
+            llmCost: parseFloat(run.llm_cost || "0"),
+            startedAt: run.started_at,
+            finishedAt: run.finished_at,
+            cancelledAt: run.cancelled_at,
+          })),
+          total: count || 0,
+          limit,
+          offset,
+        };
+      } catch (error: any) {
+        logger.error({ err: error }, "ingestion_runs_list_failed");
+        set.status = 500;
+        return { error: "Failed to list runs", message: error?.message };
+      }
+    },
+    { beforeHandle: authResolver({ required: true, role: "admin" }) },
+  )
+  .post(
+    "/ingestion/runs/:id/cancel",
+    async ({ params, set }) => {
+      const supabase = getServiceClient();
+
+      try {
+        const { data: run, error: runError } = await supabase
+          .from("research_ingestion_runs")
+          .select("id, status")
+          .eq("id", params.id)
+          .single();
+
+        if (runError || !run) {
+          set.status = 404;
+          return { error: "Run not found" };
+        }
+
+        if (run.status === "completed" || run.status === "failed" || run.status === "cancelled") {
+          set.status = 409;
+          return { error: "Cannot cancel completed run" };
+        }
+
+        const cancelledAt = new Date().toISOString();
+        await supabase
+          .from("research_ingestion_runs")
+          .update({ status: "cancelled", cancelled_at: cancelledAt })
+          .eq("id", params.id);
+
+        return {
+          runId: params.id,
+          status: "cancelled",
+          cancelledAt,
+        };
+      } catch (error: any) {
+        logger.error({ err: error, runId: params.id }, "ingestion_run_cancel_failed");
+        set.status = 500;
+        return { error: "Failed to cancel run", message: error?.message };
+      }
+    },
+    { beforeHandle: authResolver({ required: true, role: "admin" }) },
+  )
+  .get(
     "/ingestion/runs/:id",
     async ({ params, set }) => {
       const supabase = getServiceClient();
@@ -698,7 +790,7 @@ export const researchBrainRoute = new Elysia({ prefix: "/api/research-brain" })
           return { error: "Run not found" };
         }
 
-        return {
+ return {
           runId: (run as any).id,
           docsPath: (run as any).docs_path,
           status: (run as any).status,
@@ -706,8 +798,11 @@ export const researchBrainRoute = new Elysia({ prefix: "/api/research-brain" })
           processedFiles: (run as any).processed_files,
           skippedFiles: (run as any).skipped_files,
           failedFiles: (run as any).failed_files,
+          llmCost: parseFloat((run as any).llm_cost || "0"),
+          llmCallsCount: ((run as any).llm_calls || []).length,
           startedAt: (run as any).started_at,
           finishedAt: (run as any).finished_at,
+          cancelledAt: (run as any).cancelled_at,
         };
       } catch (error: any) {
         logger.error({ err: error, runId: params.id }, "ingestion_run_status_failed");
@@ -715,7 +810,7 @@ export const researchBrainRoute = new Elysia({ prefix: "/api/research-brain" })
         return { error: "Failed to get run status", message: error?.message };
       }
     },
-    { beforeHandle: authResolver({ required: false }) },
+       { beforeHandle: authResolver({ required: true, role: "admin" }) },
   )
   .get(
     "/ingestion/runs/:id/files",

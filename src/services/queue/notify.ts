@@ -139,6 +139,36 @@ export async function notifyIngestionFailed(
 }
 
 /**
+ * Helper to create and send a run:llm_call notification
+ */
+export async function notifyRunLlmCall(
+  runId: string,
+  llmCost: number,
+  llmCallsCount: number,
+): Promise<void> {
+  await notifyIngestion({
+    type: "run:llm_call",
+    runId,
+    llmCost,
+    llmCallsCount,
+  });
+}
+
+/**
+ * Helper to create and send a run:cancelled notification
+ */
+export async function notifyRunCancelled(
+  runId: string,
+  progress?: { processed: number; skipped: number; failed: number; total: number },
+): Promise<void> {
+  await notifyIngestion({
+    type: "run:cancelled",
+    runId,
+    progress,
+  });
+}
+
+/**
  * Helper to create and send a job:started notification
  */
 export async function notifyJobStarted(

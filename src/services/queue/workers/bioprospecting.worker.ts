@@ -6,71 +6,26 @@
 
 import { Worker, Job } from "bullmq";
 import { getBullMQConnection } from "../connection";
-import { notifyIngestionProgress, notifyIngestionCompleted, notifyIngestionFailed } from "../notify";
+import { notifyIngestionProgress, notifyIngestionCompleted, notifyIngestionFailed, notifyRunCancelled } from "../notify";
 import type { BioprospectingJobData } from "../types";
 import logger from "../../../utils/logger";
 import { getServiceClient } from "../../../db/client";
+import { recordLlmCall, calculateCost } from "../../researchBrain/llm-cost";
+import { resolveResearchBrainLLM } from "../../researchBrain/llm";
 
 const supabase = getServiceClient();
 
 /**
- * Get current run counters
+ * Check if run was cancelled
  */
-async function getRunCounters(runId: string): Promise<{ processed: number; skipped: number; failed: number }> {
+async function isRunCancelled(runId: string): Promise<boolean> {
   const { data: run } = await supabase
     .from("research_ingestion_runs")
-    .select("processed_files, skipped_files, failed_files, total_files")
+    .select("cancelled_at")
     .eq("id", runId)
     .single();
 
-  if (!run) return { processed: 0, skipped: 0, failed: 0 };
-  return {
-    processed: (run as any).processed_files || 0,
-    skipped: (run as any).skipped_files || 0,
-    failed: (run as any).failed_files || 0,
-  };
-}
-
-/**
- * Check if all jobs for a run are complete
- */
-async function isRunComplete(runId: string): Promise<boolean> {
-  const { data: run } = await supabase
-    .from("research_ingestion_runs")
-    .select("processed_files, skipped_files, failed_files, total_files")
-    .eq("id", runId)
-    .single();
-
-  if (!run) return false;
-
-  const processed = (run as any).processed_files || 0;
-  const skipped = (run as any).skipped_files || 0;
-  const failed = (run as any).failed_files || 0;
-  const total = (run as any).total_files || 0;
-
-  return processed + skipped + failed >= total;
-}
-
-/**
- * Finish the run (mark as completed or completed_with_errors)
- */
-async function finishRun(
-  runId: string,
-  counters: { processed: number; skipped: number; failed: number },
-): Promise<void> {
-  const status = counters.failed > 0 ? "completed_with_errors" : "completed";
-
-  try {
-    await supabase
-      .from("research_ingestion_runs")
-      .update({
-        status,
-        finished_at: new Date().toISOString(),
-      })
-      .eq("id", runId);
-  } catch (error) {
-    logger.warn({ err: error, runId }, "finish_run_failed");
-  }
+  return !!(run as any)?.cancelled_at;
 }
 
 /**
@@ -81,10 +36,38 @@ async function processBioprospectingJob(job: Job<BioprospectingJobData, any>): P
 
   logger.info({ jobId: job.id, runId, sourceId }, "bioprospecting_job_started");
 
+  // Check if run was cancelled before starting
+  if (await isRunCancelled(runId)) {
+    logger.info({ jobId: job.id, runId, sourceId }, "bioprospecting_job_skipped_cancelled");
+    await notifyRunCancelled(runId);
+    return { sourceId, status: "cancelled" };
+  }
+
+  const startTime = Date.now();
+
   try {
     // Extract bioprospecting facts from the source
     const { extractBioprospectingFactsForSource } = await import("../../../services/researchBrain");
     await extractBioprospectingFactsForSource(sourceId);
+
+    // Record LLM cost estimate
+    const { providerName, model } = resolveResearchBrainLLM();
+    if (providerName && model) {
+      const elapsed = Date.now() - startTime;
+      // Estimate ~500 tokens input + ~800 tokens output per extraction (typical for this task)
+      const inputTokens = 500;
+      const outputTokens = 800;
+      const costUsd = calculateCost(providerName, model, inputTokens, outputTokens);
+      await recordLlmCall(runId, {
+        provider: providerName,
+        model,
+        inputTokens,
+        outputTokens,
+        costUsd,
+        latencyMs: elapsed,
+        timestamp: new Date().toISOString(),
+      });
+    }
 
     logger.info({ jobId: job.id, runId, sourceId }, "bioprospecting_job_completed");
 

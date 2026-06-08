@@ -6,11 +6,12 @@ import { usePrivy } from '@privy-io/react-auth';
 import { CDPProvider } from './providers/CDPProvider';
 import { CoralPrivyProvider } from './providers/PrivyProvider';
 import { AuthProvider } from './contexts';
-import { LoginPage, ChatPage, LandingPage, AccessPendingPage, LibraryPage, PaperPage, ResearchBrainPage } from './pages';
+import { LoginPage, ChatPage, LandingPage, AccessPendingPage, LibraryPage, PaperPage, ResearchBrainPage, CorpusDashboardPage } from './pages';
 import { useAuth } from './hooks';
 import './styles/global.css';
 import './styles/coralgpt.css';
 import './styles/library.css';
+import './styles/corpus.css';
 
 function LoadingScreen() {
   return (
@@ -68,6 +69,7 @@ function LegacyAppShell() {
       <LibraryPage path="/library" />
       <PaperPage path="/library/:docId" />
       <ResearchBrainPage path="/brain" />
+      <CorpusDashboardPage path="/corpus" />
       <Redirect path="/" to="/chat" />
       <NotFound default redirectTo="/chat" />
     </Router>

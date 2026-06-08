@@ -203,6 +203,7 @@ export type EvidencePack = {
   contradictions: EvidencePackClaim[];
   openQuestions: EvidencePackClaim[];
   sources: EvidencePackSource[];
+  contradictionWarnings: EvidencePackContradiction[];
 };
 
 export type ExtractedClaim = {
@@ -331,4 +332,47 @@ export type ExtractedBioprospectingFact = {
   quote?: string;
   chunkIndex?: number;
   entities?: string[];
+};
+
+export type ResearchBioprospectingContradiction = {
+  id: string;
+  source_id: string;
+  source_fact_id: string;
+  conflicting_fact_id: string;
+  contradiction_type: string;
+  evidence_pack: {
+    source_a: { fact_id: string; source: string; value: string; provenance: string };
+    source_b: { fact_id: string; source: string; value: string; provenance: string };
+    conflict_summary: string;
+  };
+  rule_version: string | null;
+  llm_version: string | null;
+  resolution_status: string;
+  resolved_by: string | null;
+  resolved_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type EvidencePackContradiction = {
+  id: string;
+  contradictionType: string;
+  sourceA: {
+    factId: string;
+    claim: string;
+    sourceTitle: string | null;
+    doi: string | null;
+    value: string;
+    provenance: string;
+  };
+  sourceB: {
+    factId: string;
+    claim: string;
+    sourceTitle: string | null;
+    doi: string | null;
+    value: string;
+    provenance: string;
+  };
+  conflictSummary: string;
+  resolutionStatus: "unresolved" | "resolved" | "dismissed";
 };

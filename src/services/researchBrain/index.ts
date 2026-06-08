@@ -1,4 +1,5 @@
 export * from "./bioprospectingExtractor";
+export * from "./contradictionDb";
 export * from "./db";
 export * from "./extractor";
 export * from "./measurements";

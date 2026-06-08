@@ -34,11 +34,11 @@ Chain strategy: stacked-to-main
 
 ## Phase 2: Detection Engine (Rule-Based + LLM Pass)
 
-- [ ] 2.1 Create `src/services/researchBrain/contradictionDetector.ts` — export `runRuleBasedDetection(facts, sourceId, runId)` — pure function implementing `measurement_direction` and `relation_type` opposites matching from design §4
-- [ ] 2.2 Add `normalizeForMatch()` import or re-export in `contradictionDetector.ts` (reuse from `search.ts`)
-- [ ] 2.3 Add deduplication check before insert: skip if identical `source_fact_id + conflicting_fact_id + contradiction_type` row exists
-- [ ] 2.4 Create `src/services/researchBrain/contradictionLlM.ts` — export `runLLMDetection(facts, sourceId)` with flag guard on `BIOPROSPECTING_CONTRADICTION_DETECTION` and LLM availability check via `resolveResearchBrainLLM()`, implementing prompt from design §5
-- [ ] 2.5 Export `runContradictionDetection({ sourceId, runId, options? })` from `src/services/researchBrain/index.ts` — orchestrates rule-based pass then LLM pass
+- [x] 2.1 Create `src/services/researchBrain/contradictionDetector.ts` — export `runRuleBasedDetection(facts, sourceId, runId)` — pure function implementing `measurement_direction` and `relation_type` opposites matching from design §4
+- [x] 2.2 Add `normalizeForMatch()` import or re-export in `contradictionDetector.ts` (reuse from `search.ts`)
+- [x] 2.3 Add deduplication check before insert: skip if identical `source_fact_id + conflicting_fact_id + contradiction_type` row exists
+- [x] 2.4 Create `src/services/researchBrain/contradictionLlM.ts` — export `runLLMDetection(facts, sourceId)` with flag guard on `BIOPROSPECTING_CONTRADICTION_DETECTION` and LLM availability check via `resolveResearchBrainLLM()`, implementing prompt from design §5
+- [x] 2.5 Export `runContradictionDetection({ sourceId, runId, options? })` from `src/services/researchBrain/index.ts` — orchestrates rule-based pass then LLM pass
 
 ## Phase 3: Worker Integration + Search Wiring
 

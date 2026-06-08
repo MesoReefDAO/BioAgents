@@ -1390,3 +1390,18 @@ function importantWords(text: string): string[] {
     ),
   ).slice(0, 24);
 }
+
+/**
+ * Fetch all bioprospecting facts for a given source, with source and chunk relations.
+ */
+export async function getBioprospectingFactsForSource(
+  sourceId: string,
+): Promise<BioprospectingFact[]> {
+  const { data, error } = await supabase
+    .from("research_bioprospecting_facts")
+    .select("*, source:research_sources(*), chunk:research_evidence_chunks(*)")
+    .eq("source_id", sourceId);
+
+  if (error) throw error;
+  return (data || []) as BioprospectingFact[];
+}

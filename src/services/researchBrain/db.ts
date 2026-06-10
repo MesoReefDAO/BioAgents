@@ -1,5 +1,6 @@
 import { getServiceClient } from "../../db/client";
 import logger from "../../utils/logger";
+import { buildIdentityKey } from "./normalize";
 import type {
   BioprospectingFact,
   ExtractedBioprospectingFact,
@@ -441,13 +442,364 @@ export async function replaceBioprospectingFactsForSource(
 
   if (payload.length === 0) return [];
 
+  // ---------------------------------------------------------------------
+  // Phase 2: inline merge. Group the payload by buildIdentityKey, then
+  // process each group independently. Null-key groups (all five identity
+  // fields blank) are inserted as-is, no merge. Keyed singletons and
+  // keyed groups of K >= 2 go through canonical selection and edge
+  // insertion; cross-source collisions (PG 23505 on the canonical row
+  // because a pre-existing fact already owns the key) are re-routed:
+  // the existing canonical stays put, the incoming rows become merged
+  // siblings with edges pointing to the existing canonical.
+  // ---------------------------------------------------------------------
+
+  const groups: Map<string, typeof payload> = new Map();
+  const nullKeyFacts: typeof payload = [];
+  for (const fact of payload) {
+    const key = buildIdentityKey(fact as BioprospectingFact);
+    if (key === null) {
+      nullKeyFacts.push(fact);
+    } else {
+      const bucket = groups.get(key);
+      if (bucket) bucket.push(fact);
+      else groups.set(key, [fact]);
+    }
+  }
+
+  const inserted: BioprospectingFact[] = [];
+
+  // Null-key group: insert as plain rows (no dedup eligibility).
+  if (nullKeyFacts.length > 0) {
+    const { data, error } = await supabase
+      .from("research_bioprospecting_facts")
+      .insert(nullKeyFacts)
+      .select("*");
+    if (error) throw error;
+    inserted.push(...((data || []) as BioprospectingFact[]));
+  }
+
+  // Keyed groups (singletons and K >= 2).
+  for (const [key, group] of groups) {
+    if (group.length === 1) {
+      const row = await insertCanonicalWithReroute(group[0], key);
+      inserted.push(row.canonical, ...row.mergedSiblings);
+    } else {
+      const canonicalIndex = pickCanonicalIndex(group);
+      const canonical = group[canonicalIndex];
+      const siblings = group.filter((_, idx) => idx !== canonicalIndex);
+
+      const { data: canonicalRow, error: canonicalError } = await supabase
+        .from("research_bioprospecting_facts")
+        .insert([canonical])
+        .select("*")
+        .single();
+
+      if (canonicalError) {
+        if (canonicalError.code === "23505") {
+          // Cross-source collision: a pre-existing canonical owns this key.
+          const existing = await findCanonicalByIdentityKey(key);
+          if (!existing) throw canonicalError; // unexpected
+          const { data: mergedRows, error: mergedError } = await supabase
+            .from("research_bioprospecting_facts")
+            .insert(
+              group.map((fact) => ({
+                ...fact,
+                merged_into_fact_id: existing.id,
+              })),
+            )
+            .select("*");
+          if (mergedError) throw mergedError;
+          const mergedIds = (mergedRows || []).map((r) => r.id as string);
+          await insertMergeEdges(existing.id, mergedIds);
+          inserted.push(
+            existing,
+            ...((mergedRows || []) as BioprospectingFact[]),
+          );
+          continue;
+        }
+        throw canonicalError;
+      }
+
+      // Canonical persisted. Insert siblings with merged_into_fact_id set
+      // (the partial unique index allows siblings because the column is
+      // non-NULL on those rows). Then write the K-1 edges.
+      const siblingsWithParent = siblings.map((sibling) => ({
+        ...sibling,
+        merged_into_fact_id: canonicalRow.id,
+      }));
+      const { data: siblingRows, error: siblingError } = await supabase
+        .from("research_bioprospecting_facts")
+        .insert(siblingsWithParent)
+        .select("*");
+      if (siblingError) throw siblingError;
+      const siblingIds = (siblingRows || []).map((r) => r.id as string);
+      await insertMergeEdges(canonicalRow.id, siblingIds);
+      inserted.push(
+        canonicalRow as BioprospectingFact,
+        ...((siblingRows || []) as BioprospectingFact[]),
+      );
+    }
+  }
+
+  return inserted;
+}
+
+/**
+ * Canonical-selection precedence for inline merge. Verified wins over
+ * any non-verified row. Within a review_status class the most recent
+ * `updated_at` wins; ties break by `source_id` ascending (deterministic),
+ * then by array index (stable) for the within-source case where
+ * `source_id` is the same for every fact in the group.
+ *
+ * Returns the index into the group array.
+ */
+function pickCanonicalIndex(
+  group: Array<Record<string, unknown>>,
+): number {
+  let bestIndex = 0;
+  let bestScore = canonicalScore(group[0], 0);
+  for (let i = 1; i < group.length; i++) {
+    const score = canonicalScore(group[i], i);
+    if (compareCanonicalScores(score, bestScore) < 0) {
+      bestIndex = i;
+      bestScore = score;
+    }
+  }
+  return bestIndex;
+}
+
+type CanonicalScore = {
+  verified: 0 | 1;
+  updatedAt: number; // ms epoch; higher = more recent
+  sourceId: string;
+  arrayIndex: number;
+};
+
+function canonicalScore(
+  fact: Record<string, unknown>,
+  arrayIndex: number,
+): CanonicalScore {
+  const reviewStatus = fact.review_status as string | undefined;
+  const updatedAtRaw = (fact.updated_at ?? fact.created_at) as
+    | string
+    | number
+    | Date
+    | null
+    | undefined;
+  const updatedAt = updatedAtRaw ? new Date(updatedAtRaw).getTime() : 0;
+  return {
+    verified: reviewStatus === "verified" ? 0 : 1,
+    updatedAt,
+    sourceId: (fact.source_id as string) ?? "",
+    arrayIndex,
+  };
+}
+
+function compareCanonicalScores(
+  candidate: CanonicalScore,
+  current: CanonicalScore,
+): number {
+  // Lower = better. Returns negative if `candidate` should win.
+  if (candidate.verified !== current.verified) {
+    return candidate.verified - current.verified;
+  }
+  if (candidate.updatedAt !== current.updatedAt) {
+    // More recent wins → larger updatedAt is better → subtract.
+    return current.updatedAt - candidate.updatedAt;
+  }
+  if (candidate.sourceId !== current.sourceId) {
+    return candidate.sourceId < current.sourceId ? -1 : 1;
+  }
+  // Final tiebreaker: smaller array index wins (stable order).
+  return candidate.arrayIndex - current.arrayIndex;
+}
+
+/**
+ * Insert a single canonical row, handling the cross-source collision case
+ * (PG 23505) by re-routing: the existing pre-existing row stays as canonical,
+ * the incoming row(s) become merged siblings with edges pointing to it.
+ *
+ * Used for keyed singleton groups. The K >= 2 case handles its own
+ * re-route inline because the canonical needs to be attempted first
+ * (siblings depend on the canonical's id).
+ */
+async function insertCanonicalWithReroute(
+  fact: Record<string, unknown>,
+  key: string,
+): Promise<{ canonical: BioprospectingFact; mergedSiblings: BioprospectingFact[] }> {
   const { data, error } = await supabase
     .from("research_bioprospecting_facts")
-    .insert(payload)
-    .select("*");
+    .insert([fact])
+    .select("*")
+    .single();
 
+  if (!error) {
+    return { canonical: data as BioprospectingFact, mergedSiblings: [] };
+  }
+
+  if (error.code !== "23505") {
+    throw error;
+  }
+
+  // Cross-source collision. Look up the existing canonical and re-route.
+  const existing = await findCanonicalByIdentityKey(key);
+  if (!existing) throw error; // unexpected: 23505 with no matching row
+
+  const { data: mergedRows, error: mergedError } = await supabase
+    .from("research_bioprospecting_facts")
+    .insert([{ ...fact, merged_into_fact_id: existing.id }])
+    .select("*");
+  if (mergedError) throw mergedError;
+  const mergedIds = (mergedRows || []).map((r) => r.id as string);
+  await insertMergeEdges(existing.id, mergedIds);
+  return {
+    canonical: existing,
+    mergedSiblings: (mergedRows || []) as BioprospectingFact[],
+  };
+}
+
+/**
+ * Look up the canonical fact for a given identity_key (the row with
+ * merged_into_fact_id IS NULL, if any). Returns null if the key is not
+ * present in the table or if every row with that key is itself a merged
+ * sibling (defensive — partial unique index prevents this in practice).
+ */
+async function findCanonicalByIdentityKey(
+  key: string,
+): Promise<BioprospectingFact | null> {
+  const { data, error } = await supabase
+    .from("research_bioprospecting_facts")
+    .select("*")
+    .eq("identity_key", key)
+    .is("merged_into_fact_id", null)
+    .maybeSingle();
   if (error) throw error;
-  return (data || []) as BioprospectingFact[];
+  return (data as BioprospectingFact | null) ?? null;
+}
+
+/**
+ * Insert K-1 edge rows pointing from each merged fact id to the canonical
+ * fact id. The composite PK (canonical, merged) is the authoritative
+ * uniqueness guard — duplicates (e.g., re-running the merge on the same
+ * data) are silently treated as success via ON CONFLICT DO NOTHING.
+ */
+async function insertMergeEdges(
+  canonicalId: string,
+  mergedIds: string[],
+): Promise<void> {
+  if (mergedIds.length === 0) return;
+  const rows = mergedIds.map((mergedId) => ({
+    canonical_fact_id: canonicalId,
+    merged_fact_id: mergedId,
+    match_rule: "identity_key" as const,
+  }));
+  const { error } = await supabase
+    .from("research_bioprospecting_fact_edges")
+    .insert(rows)
+    .select();
+  if (error) {
+    // Composite PK collision: edge already exists for this pair. Idempotent
+    // re-runs hit this branch; surface other errors.
+    if (error.code !== "23505") {
+      logger.warn(
+        { err: error, canonicalId, mergedIds },
+        "bioprospecting_merge_edge_insert_failed",
+      );
+      throw error;
+    }
+  }
+}
+
+/**
+ * Read-only lineage helper. Given a list of fact ids, returns the subset
+ * that have been merged into a canonical (i.e., appear as
+ * `merged_fact_id` in `research_bioprospecting_fact_edges`).
+ *
+ * Backed by the `merged_into_fact_id` column on
+ * `research_bioprospecting_facts` (denormalized cache, kept in sync by
+ * the inline merge in `replaceBioprospectingFactsForSource`). The edge
+ * table is the authoritative source of truth; this column lets the
+ * lookup stay a single-table query.
+ *
+ * Read-only: no insert, update, or delete.
+ */
+export async function findMergedFactIds(
+  factIds: string[],
+): Promise<Set<string>> {
+  const uniqueIds = Array.from(new Set(factIds.filter(Boolean)));
+  if (uniqueIds.length === 0) return new Set();
+
+  const { data, error } = await supabase
+    .from("research_bioprospecting_facts")
+    .select("id")
+    .in("id", uniqueIds)
+    .not("merged_into_fact_id", "is", null);
+  if (error) throw error;
+  return new Set(((data || []) as Array<{ id: string }>).map((r) => r.id));
+}
+
+/**
+ * Read-only lineage helper. Given a fact id, returns the dedup group it
+ * belongs to: the canonical fact plus any merged siblings. Resolves from
+ * either side (canonical or merged) — if `factId` is itself a merged
+ * sibling the function still returns the canonical it points at.
+ *
+ * Returns `null` when the fact is standalone (no edges touch it and
+ * no other row references it as a canonical).
+ *
+ * Read-only: no insert, update, or delete.
+ */
+export async function getDuplicateGroup(
+  factId: string,
+): Promise<{ canonical: BioprospectingFact; merged: BioprospectingFact[] } | null> {
+  if (!factId) return null;
+
+  // Touch the edge table to detect group membership cheaply.
+  const { data: edges, error: edgesError } = await supabase
+    .from("research_bioprospecting_fact_edges")
+    .select("canonical_fact_id, merged_fact_id")
+    .or(`canonical_fact_id.eq.${factId},merged_fact_id.eq.${factId}`)
+    .limit(1);
+  if (edgesError) throw edgesError;
+  if (!edges || edges.length === 0) return null;
+
+  // Resolve canonical id. The fact itself may be canonical (it appears
+  // as canonical_fact_id) or a merged sibling (it appears as merged_fact_id).
+  const row = edges[0] as { canonical_fact_id: string; merged_fact_id: string };
+  const canonicalId =
+    row.canonical_fact_id === factId ? factId : row.canonical_fact_id;
+
+  // Fetch the full group: the canonical plus every row that points to it.
+  // Two queries then merge: the canonical row (matched by id + null parent)
+  // and the sibling rows (matched by parent). Merged in memory.
+  const [{ data: canonicalRow, error: canonicalError }, { data: siblingRows, error: siblingsError }] =
+    await Promise.all([
+      supabase
+        .from("research_bioprospecting_facts")
+        .select("*, source:research_sources(*), chunk:research_evidence_chunks(*)")
+        .eq("id", canonicalId)
+        .is("merged_into_fact_id", null)
+        .maybeSingle(),
+      supabase
+        .from("research_bioprospecting_facts")
+        .select("*, source:research_sources(*), chunk:research_evidence_chunks(*)")
+        .eq("merged_into_fact_id", canonicalId),
+    ]);
+  if (canonicalError) throw canonicalError;
+  if (siblingsError) throw siblingsError;
+
+  const groupData = canonicalRow
+    ? [canonicalRow, ...((siblingRows || []) as BioprospectingFact[])]
+    : ((siblingRows || []) as BioprospectingFact[]);
+  if (groupData.length === 0) return null;
+
+  const canonical = groupData.find((r) => r.id === canonicalId) as
+    | BioprospectingFact
+    | undefined;
+  if (!canonical) return null;
+
+  const merged = groupData.filter((r) => r.id !== canonicalId) as BioprospectingFact[];
+  return { canonical, merged };
 }
 
 export type BioprospectingFactSearchParams = {

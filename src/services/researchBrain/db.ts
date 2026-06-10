@@ -12,8 +12,28 @@ import type {
   ResearchTaxonRank,
   ResearchTrustTier,
 } from "./types";
+import type { SupabaseClient } from "@supabase/supabase-js";
 
-const supabase = getServiceClient();
+/**
+ * Lazily-resolved Supabase client proxy. Every property access on
+ * `supabase` (e.g., `supabase.from(...)`) calls `getServiceClient()`
+ * fresh, so the singleton in `src/db/client.ts` is consulted on every
+ * operation. This is a no-op in production (the singleton is cached
+ * after first call) and makes the module fully testable: tests can
+ * register a `mock.module` for `../../db/client` and the proxy will
+ * resolve to the mock on each call.
+ *
+ * Without this proxy, `const supabase = getServiceClient()` would
+ * capture the client ONCE at module load time, freezing the test
+ * mock before `beforeEach` can swap it.
+ */
+const supabase = new Proxy({} as SupabaseClient, {
+  get(_target, prop) {
+    const client = getServiceClient() as unknown as Record<string | symbol, unknown>;
+    const value = client[prop];
+    return typeof value === "function" ? value.bind(client) : value;
+  },
+}) as SupabaseClient;
 
 const DOI_REGEX = /10\.\d{4,9}\/[-._;()/:A-Z0-9]+/i;
 
@@ -551,9 +571,12 @@ export async function replaceBioprospectingFactsForSource(
  * then by array index (stable) for the within-source case where
  * `source_id` is the same for every fact in the group.
  *
+ * Exported so the test suite can verify the precedence ordering without
+ * hitting the database — the function is pure.
+ *
  * Returns the index into the group array.
  */
-function pickCanonicalIndex(
+export function pickCanonicalIndex(
   group: Array<Record<string, unknown>>,
 ): number {
   let bestIndex = 0;
@@ -802,6 +825,181 @@ export async function getDuplicateGroup(
   return { canonical, merged };
 }
 
+/**
+ * Result of a single backfill invocation.
+ *
+ * `edgesInserted` and `edgesSkipped` always sum to `edgesProposed`
+ * (a duplicate edge is counted as `skipped`, not `inserted`).
+ * `examples` carries up to 10 sample groups for operator review during
+ * a dry run.
+ */
+export type BioprospectingFactDedupBackfillResult = {
+  scannedFacts: number;
+  groupsFound: number;
+  edgesProposed: number;
+  edgesInserted: number;
+  edgesSkipped: number;
+  examples: Array<{
+    identityKey: string;
+    canonicalId: string;
+    canonicalReviewStatus: string | null;
+    mergedIds: string[];
+  }>;
+};
+
+/**
+ * One-shot backfill that dedupes the `research_bioprospecting_facts`
+ * table as it exists before this change ships. Mirrors the inline merge
+ * in `replaceBioprospectingFactsForSource` but is read-or-additive only
+ * (no fact row is mutated).
+ *
+ * Algorithm:
+ *   1. Read facts where `id NOT IN (SELECT merged_fact_id FROM
+ *      research_bioprospecting_fact_edges)`, ordered by
+ *      `(created_at, id)` and capped at `limit`.
+ *   2. Compute `buildIdentityKey` in-memory for each candidate.
+ *   3. Group by key (skip nulls).
+ *   4. For each group of size K >= 2, pick the canonical via
+ *      `pickCanonicalIndex` (verified > updated_at desc > source_id asc
+ *      > id asc — same rule as inline merge).
+ *   5. In `--apply` mode, INSERT edge rows
+ *      `(canonical.id, sibling.id, 'identity_key')` with
+ *      `ON CONFLICT (canonical_fact_id, merged_fact_id) DO NOTHING`.
+ *      Composite PK collisions are counted as `edgesSkipped`.
+ *   6. In `--dry-run` mode, no inserts happen; `edgesProposed` is the
+ *      number of edges that WOULD be inserted.
+ *
+ * Idempotency: re-running with `--apply` on the same data reports
+ * `edgesInserted: 0` and `edgesSkipped: edgesProposed`. The script
+ * is additive only — no fact row is updated, deleted, or
+ * re-canonicalized. Safe to re-run any number of times.
+ */
+export async function backfillBioprospectingFactDedup(params: {
+  limit?: number;
+  batchSize?: number;
+  dryRun?: boolean;
+}): Promise<BioprospectingFactDedupBackfillResult> {
+  const limit = params.limit ?? 500;
+  const batchSize = params.batchSize ?? 500;
+  const dryRun = params.dryRun ?? true;
+
+  const { data: candidateRows, error: candidateError } = await supabase
+    .from("research_bioprospecting_facts")
+    .select(
+      "id, source_id, species, compound, bioactivity, organism_part, geography, review_status, updated_at, created_at, merged_into_fact_id",
+    )
+    .not(
+      "id",
+      "in",
+      "(SELECT merged_fact_id FROM research_bioprospecting_fact_edges)",
+    )
+    .order("created_at", { ascending: true })
+    .order("id", { ascending: true })
+    .limit(limit);
+
+  if (candidateError) throw candidateError;
+
+  const rows = (candidateRows || []) as Array<Record<string, unknown>>;
+  const scannedFacts = rows.length;
+
+  // Group by identity key in memory. Skip null keys (all five identity
+  // fields blank — not eligible for dedup).
+  const groups = new Map<string, Array<Record<string, unknown>>>();
+  for (const row of rows) {
+    const key = buildIdentityKey(row as BioprospectingFact);
+    if (key === null) continue;
+    const bucket = groups.get(key);
+    if (bucket) bucket.push(row);
+    else groups.set(key, [row]);
+  }
+
+  // Plan edges per group. Only K >= 2 groups produce proposed edges.
+  type PlannedEdge = {
+    canonicalId: string;
+    mergedId: string;
+    identityKey: string;
+    canonicalReviewStatus: string | null;
+    mergedIds: string[];
+  };
+  const plannedEdges: PlannedEdge[] = [];
+  const exampleSummaries: BioprospectingFactDedupBackfillResult["examples"] = [];
+
+  for (const [identityKey, group] of groups) {
+    if (group.length < 2) continue;
+    const canonicalIndex = pickCanonicalIndex(group);
+    const canonical = group[canonicalIndex] as Record<string, unknown>;
+    const siblings = group.filter((_, idx) => idx !== canonicalIndex);
+
+    const canonicalId = canonical.id as string;
+    const canonicalReviewStatus =
+      (canonical.review_status as string) ?? null;
+    const mergedIds = siblings.map((s) => s.id as string);
+
+    for (const mergedId of mergedIds) {
+      plannedEdges.push({
+        canonicalId,
+        mergedId,
+        identityKey,
+        canonicalReviewStatus,
+        mergedIds,
+      });
+    }
+
+    if (exampleSummaries.length < 10) {
+      exampleSummaries.push({
+        identityKey,
+        canonicalId,
+        canonicalReviewStatus,
+        mergedIds,
+      });
+    }
+  }
+
+  const edgesProposed = plannedEdges.length;
+  let edgesInserted = 0;
+  let edgesSkipped = 0;
+
+  if (!dryRun && edgesProposed > 0) {
+    // Insert in batches with ON CONFLICT DO NOTHING. Composite PK
+    // (canonical, merged) is the authoritative uniqueness guard.
+    for (let i = 0; i < plannedEdges.length; i += batchSize) {
+      const slice = plannedEdges.slice(i, i + batchSize);
+      const insertRows = slice.map((edge) => ({
+        canonical_fact_id: edge.canonicalId,
+        merged_fact_id: edge.mergedId,
+        match_rule: "identity_key" as const,
+      }));
+      const { data: inserted, error: insertError } = await supabase
+        .from("research_bioprospecting_fact_edges")
+        .insert(insertRows)
+        .select("canonical_fact_id, merged_fact_id");
+      if (insertError) {
+        // Composite PK collision means "already merged" — treat as
+        // success. Anything else is a real error.
+        if (insertError.code !== "23505") throw insertError;
+        // Whole batch collided: count as skipped.
+        edgesSkipped += slice.length;
+        continue;
+      }
+      // supabase-js does not distinguish inserted vs. skipped in the
+      // response for ON CONFLICT DO NOTHING. Treat the response as the
+      // subset that the server actually wrote.
+      const written = (inserted || []).length;
+      edgesInserted += written;
+      edgesSkipped += slice.length - written;
+    }
+  }
+
+  return {
+    scannedFacts,
+    groupsFound: Array.from(groups.values()).filter((g) => g.length >= 2).length,
+    edgesProposed,
+    edgesInserted: dryRun ? 0 : edgesInserted,
+    edgesSkipped: dryRun ? edgesProposed : edgesSkipped,
+    examples: exampleSummaries,
+  };
+}
+
 export type BioprospectingFactSearchParams = {
   query: string;
   limit?: number;
@@ -813,6 +1011,20 @@ export type BioprospectingFactSearchParams = {
   reviewStatus?: BioprospectingReviewStatus | "all";
   sourceId?: string;
   sourceTrustTier?: ResearchTrustTier | "all";
+  /**
+   * Whether to include facts that have been merged into a canonical via
+   * the dedup edge table (`research_bioprospecting_fact_edges`).
+   *
+   * **Default: `false`.** When omitted or `false`, the search applies an
+   * SQL-level `id NOT IN (SELECT merged_fact_id FROM edges)` filter so
+   * merged siblings never appear in the result set. Set this to `true`
+   * only when the caller wants to inspect duplicates (e.g., the review
+   * dashboard). The filter is applied at the SQL layer (not in JS
+   * post-fetch) so result counts stay consistent with `limit`.
+   *
+   * Phase 3 of bioprospecting-semantic-dedup.
+   */
+  includeDuplicates?: boolean;
 };
 
 export type BioprospectingReviewStatus =
@@ -998,6 +1210,20 @@ export async function updateBioprospectingFactEntities(params: {
   return data as BioprospectingFact;
 }
 
+/**
+ * Search bioprospecting facts by free-text query plus optional filters.
+ *
+ * **Important (Phase 3 of bioprospecting-semantic-dedup):** facts that
+ * have been merged into a canonical via
+ * `research_bioprospecting_fact_edges` are HIDDEN from the result set by
+ * default. Set `includeDuplicates: true` on the params to surface them
+ * (used by the review dashboard). The filter is applied at the SQL
+ * layer so the post-filter row count is what gets ranked and sliced.
+ *
+ * All other filters (source, trust tier, review status, measurement,
+ * condition) behave as before. Ranking, dedup of equal results, and
+ * source filtering are untouched.
+ */
 export async function searchBioprospectingFacts(
   params: BioprospectingFactSearchParams,
 ): Promise<BioprospectingFact[]> {
@@ -1018,6 +1244,19 @@ export async function searchBioprospectingFacts(
       .select(
         "*, source:research_sources(*), chunk:research_evidence_chunks(*)",
       );
+    // Phase 3 of bioprospecting-semantic-dedup: hide merged siblings by
+    // default. The filter is a SQL subselect against the dedup edge
+    // table — applied here, at the SQL layer, so the post-filter
+    // result set is what gets ranked and sliced. Setting
+    // `includeDuplicates: true` skips the filter and returns both
+    // canonical and merged rows.
+    if (!params.includeDuplicates) {
+      request = request.not(
+        "id",
+        "in",
+        "(SELECT merged_fact_id FROM research_bioprospecting_fact_edges)",
+      );
+    }
     request = applyBioprospectingSourceFilter(
       request,
       params,

@@ -4,13 +4,16 @@ import type {
   BioprospectingReviewStatus,
 } from "./db";
 import { searchBioprospectingFacts, searchClaims } from "./db";
+import { searchBioprospectingContradictions } from "./contradictionDb";
 import type {
   BioprospectingFact,
   EvidencePack,
   EvidencePackBioprospectingFact,
   EvidencePackClaim,
+  EvidencePackContradiction,
   EvidencePackQueryPlan,
   EvidencePackSource,
+  ResearchBioprospectingContradiction,
   ResearchClaim,
   ResearchTrustTier,
 } from "./types";
@@ -234,6 +237,43 @@ export async function researchBrainSearch(params: {
         fact.evidenceStrength === params.evidenceStrength,
     );
 
+  // Fetch contradictions for returned facts
+  const factIds = facts.map((f) => f.id);
+  const contradictions = await searchBioprospectingContradictions({ factIds });
+  const contradictionWarnings = contradictions.map(
+    (c: ResearchBioprospectingContradiction): EvidencePackContradiction => ({
+      id: c.id,
+      contradictionType: c.contradiction_type,
+      sourceA: {
+        factId: c.source_fact_id,
+        claim:
+          (c as any).source_fact?.result_summary ||
+          (c as any).source_fact?.quote ||
+          "",
+        sourceTitle: (c as any).source?.title || null,
+        doi: (c as any).source?.doi || null,
+        value: (c as any).evidence_pack?.source_a?.value || "",
+        provenance: (c as any).evidence_pack?.source_a?.provenance || "",
+      },
+      sourceB: {
+        factId: c.conflicting_fact_id,
+        claim:
+          (c as any).conflicting_fact?.result_summary ||
+          (c as any).conflicting_fact?.quote ||
+          "",
+        sourceTitle: (c as any).conflicting_fact?.source?.title || null,
+        doi: (c as any).conflicting_fact?.source?.doi || null,
+        value: (c as any).evidence_pack?.source_b?.value || "",
+        provenance: (c as any).evidence_pack?.source_b?.provenance || "",
+      },
+      conflictSummary: (c as any).evidence_pack?.conflict_summary || "",
+      resolutionStatus: c.resolution_status as
+        | "unresolved"
+        | "resolved"
+        | "dismissed",
+    }),
+  );
+
   const pack: EvidencePack = {
     question: params.query,
     queryPlan,
@@ -245,6 +285,7 @@ export async function researchBrainSearch(params: {
     contradictions: mapped.filter((claim) => claim.status === "contradicted"),
     openQuestions: mapped.filter((claim) => claim.status === "open_question"),
     sources: buildSources(claims, facts),
+    contradictionWarnings,
   };
 
   if (

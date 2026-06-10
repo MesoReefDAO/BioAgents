@@ -7,7 +7,7 @@
 import { Worker, Job } from "bullmq";
 import { getBullMQConnection } from "../connection";
 import { notifyIngestionProgress, notifyIngestionCompleted, notifyIngestionFailed, notifyRunCancelled } from "../notify";
-import type { BioprospectingJobData } from "../types";
+import type { BioprospectingJobData, ContradictionDetectionJobData } from "../types";
 import logger from "../../../utils/logger";
 import { getServiceClient } from "../../../db/client";
 import { recordLlmCall, calculateCost } from "../../researchBrain/llm-cost";
@@ -30,8 +30,30 @@ async function isRunCancelled(runId: string): Promise<boolean> {
 
 /**
  * Process a bioprospecting job
+ * Shape-based routing: jobs without maxChunks/batchSize are contradiction detection jobs.
  */
-async function processBioprospectingJob(job: Job<BioprospectingJobData, any>): Promise<any> {
+async function processBioprospectingJob(
+  job: Job<BioprospectingJobData | ContradictionDetectionJobData, any>,
+): Promise<any> {
+  const { runId, sourceId } = job.data;
+
+  // Shape-based routing: no maxChunks/batchSize means contradiction detection job
+  const isContradictionJob =
+    job.data.maxChunks === undefined && job.data.batchSize === undefined;
+
+  if (isContradictionJob) {
+    return processContradictionDetectionJob(
+      job as Job<ContradictionDetectionJobData, any>,
+    );
+  }
+
+  return processExtractionJob(job as Job<BioprospectingJobData, any>);
+}
+
+/**
+ * Process a bioprospecting extraction job
+ */
+async function processExtractionJob(job: Job<BioprospectingJobData, any>): Promise<any> {
   const { runId, sourceId, options } = job.data;
 
   logger.info({ jobId: job.id, runId, sourceId }, "bioprospecting_job_started");
@@ -69,6 +91,14 @@ async function processBioprospectingJob(job: Job<BioprospectingJobData, any>): P
       });
     }
 
+    // Run contradiction detection after extraction (flag-gated, async)
+    if (process.env.BIOPROSPECTING_CONTRADICTION_DETECTION === "true") {
+      const { runContradictionDetection } = await import(
+        "../../../services/researchBrain"
+      );
+      await runContradictionDetection({ sourceId, runId });
+    }
+
     logger.info({ jobId: job.id, runId, sourceId }, "bioprospecting_job_completed");
 
     return { sourceId, status: "completed" };
@@ -82,13 +112,46 @@ async function processBioprospectingJob(job: Job<BioprospectingJobData, any>): P
 }
 
 /**
+ * Process a contradiction detection job (no extraction, only detection)
+ */
+async function processContradictionDetectionJob(
+  job: Job<ContradictionDetectionJobData, any>,
+): Promise<any> {
+  const { runId, sourceId, options } = job.data;
+  const force = options?.force ?? false;
+
+  logger.info(
+    { jobId: job.id, runId, sourceId, force },
+    "contradiction_detection_job_started",
+  );
+
+  try {
+    const { runContradictionDetection } = await import("../../../services/researchBrain");
+    const result = await runContradictionDetection({ sourceId, runId, options: { force } });
+
+    logger.info({ jobId: job.id, runId, sourceId }, "contradiction_detection_job_completed");
+
+    return { sourceId, status: "completed", ...result };
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : "Unknown error";
+
+    logger.error(
+      { jobId: job.id, runId, sourceId, error: errorMessage },
+      "contradiction_detection_job_failed",
+    );
+
+    return { sourceId, status: "failed", error: errorMessage };
+  }
+}
+
+/**
  * Create and start the bioprospecting worker
  */
-export function createBioprospectingWorker(): Worker<BioprospectingJobData, any> {
+export function createBioprospectingWorker(): Worker<BioprospectingJobData | ContradictionDetectionJobData, any> {
   const connection = getBullMQConnection();
   const concurrency = parseInt(process.env.BIOPROSPECTING_CONCURRENCY || "1", 10);
 
-  const worker = new Worker<BioprospectingJobData, any>(
+  const worker = new Worker<BioprospectingJobData | ContradictionDetectionJobData, any>(
     "bioprospecting",
     processBioprospectingJob,
     {

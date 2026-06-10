@@ -216,6 +216,19 @@ export interface BioprospectingJobData {
 }
 
 /**
+ * Job data for contradiction detection (manual re-run via queue).
+ * Same queue as bioprospecting; worker routes by shape detection.
+ * If maxChunks/batchSize are absent, it's a contradiction detection job.
+ */
+export interface ContradictionDetectionJobData {
+  runId: string;
+  sourceId: string;
+  options?: {
+    force?: boolean;
+  };
+}
+
+/**
  * Ingestion notification types sent via Redis Pub/Sub
  */
 export type IngestionNotificationType =

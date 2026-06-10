@@ -7,12 +7,14 @@ import {
   extractBioprospectingFactsForSource,
   extractClaimsForSource,
   getClaim,
+  getContradictionsForSource,
   getSourceClaims,
   getSourceEvidenceChunk,
   listResearchTaxa,
   listSources,
   normalizeBioprospectingTaxonomy,
   researchBrainSearch,
+  resolveBioprospectingContradiction,
   searchBioprospectingFacts,
   updateBioprospectingFactEntities,
   updateBioprospectingFactReview,
@@ -910,6 +912,79 @@ export const researchBrainRoute = new Elysia({ prefix: "/api/research-brain" })
       };
     },
     { beforeHandle: authResolver({ required: false }) },
+  )
+  .get(
+    "/sources/:sourceId/contradictions",
+    async ({ params, query, set }) => {
+      const status = (query as any).status ?? "all";
+      const validStatuses = new Set(["unresolved", "resolved", "dismissed", "all"]);
+      if (!validStatuses.has(status)) {
+        set.status = 400;
+        return { error: "Invalid status. Use: unresolved|resolved|dismissed|all" };
+      }
+      try {
+        const contradictions = await getContradictionsForSource({
+          sourceId: params.sourceId,
+          status: status as "unresolved" | "resolved" | "dismissed" | "all",
+        });
+        return { contradictions };
+      } catch (error: any) {
+        logger.error({ err: error, sourceId: params.sourceId }, "source_contradictions_failed");
+        set.status = 500;
+        return { error: "Failed to get contradictions", message: error?.message };
+      }
+    },
+    { beforeHandle: authResolver({ required: false }) },
+  )
+  .post(
+    "/contradictions/:id/resolve",
+    async ({ params, body, request, set }) => {
+      const parsed = (body || {}) as {
+        resolutionStatus?: string;
+        resolvedBy?: string;
+      };
+      const allowedStatuses = new Set(["resolved", "dismissed"]);
+      if (!parsed.resolutionStatus || !allowedStatuses.has(parsed.resolutionStatus)) {
+        set.status = 400;
+        return { error: "Invalid resolutionStatus. Use: resolved|dismissed" };
+      }
+      try {
+        const contradiction = await resolveBioprospectingContradiction({
+          contradictionId: params.id,
+          resolutionStatus: parsed.resolutionStatus as "resolved" | "dismissed",
+          resolvedBy: parsed.resolvedBy || (request as any).auth?.userId,
+        });
+        return { contradiction };
+      } catch (error: any) {
+        logger.error({ err: error, contradictionId: params.id }, "contradiction_resolve_failed");
+        set.status = 500;
+        return { error: "Failed to resolve contradiction", message: error?.message };
+      }
+    },
+    { beforeHandle: authResolver({ required: true }) },
+  )
+  .post(
+    "/sources/:sourceId/contradictions/detect",
+    async ({ params, set }) => {
+      if (!isJobQueueEnabled()) {
+        set.status = 400;
+        return { error: "Job queue is not enabled. Set USE_JOB_QUEUE=true." };
+      }
+      try {
+        const { getBioprospectingQueue } = await import("../services/queue/queues");
+        const queue = getBioprospectingQueue();
+        const job = await queue.add("bioprospecting", {
+          runId: crypto.randomUUID(),
+          sourceId: params.sourceId,
+        });
+        return { jobId: job.id, status: "enqueued" };
+      } catch (error: any) {
+        logger.error({ err: error, sourceId: params.sourceId }, "contradiction_detect_enqueue_failed");
+        set.status = 500;
+        return { error: "Failed to enqueue contradiction detection", message: error?.message };
+      }
+    },
+    { beforeHandle: authResolver({ required: true }) },
   );
 
 export default researchBrainRoute;

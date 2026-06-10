@@ -6,6 +6,7 @@ export * from "./db";
 export * from "./extractor";
 export * from "./measurements";
 export * from "./memoryWriter";
+export * from "./normalize";
 export * from "./search";
 export * from "./taxonomy";
 export * from "./types";

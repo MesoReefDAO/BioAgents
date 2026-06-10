@@ -1148,7 +1148,7 @@ function deriveGenusFromSpecies(
   return first && first.length > 3 ? first : null;
 }
 
-function normalizeForMatch(value: string): string {
+export function normalizeForMatch(value: string): string {
   return value
     .normalize("NFKD")
     .replace(/\p{Diacritic}/gu, "")

@@ -270,8 +270,33 @@ export type BioprospectingFact = {
   metadata?: Record<string, unknown>;
   created_at?: string;
   updated_at?: string;
+  /**
+   * Database-generated identity key (5-tuple
+   * species|compound|bioactivity|organism_part|geography, normalized).
+   * Populated by `buildIdentityKey`/the `identity_key` GENERATED column.
+   * Read-only; the source of truth is the database.
+   */
+  identity_key?: string | null;
+  /**
+   * Set on non-canonical rows: the id of the canonical fact that this
+   * row was merged into. `null`/undefined for canonical and standalone
+   * facts. Inverse of `research_bioprospecting_fact_edges.merged_fact_id`.
+   */
+  merged_into_fact_id?: string | null;
   source?: ResearchSource;
   chunk?: ResearchEvidenceChunk;
+};
+
+/**
+ * Lineage edge between a canonical fact and a fact that was collapsed
+ * into it by deduplication. Mirrors the schema of
+ * `public.research_bioprospecting_fact_edges`.
+ */
+export type BioprospectingFactEdge = {
+  canonical_fact_id: string;
+  merged_fact_id: string;
+  match_rule: "identity_key" | "embedding";
+  merged_at: string;
 };
 
 export type ResearchTaxonRank = "species" | "genus" | "family" | "higher_taxon";

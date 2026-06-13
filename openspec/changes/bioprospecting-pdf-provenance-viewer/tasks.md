@@ -81,22 +81,22 @@ Chain strategy: feature-branch-chain
 
 ## Phase 4: Text-Chunk Fallback + Badges (PR #3)
 
-- [ ] 4.1 Create `client/src/contexts/ProvenanceContext.tsx` — provider + lightbox; `openLightbox` / `openInTab`
-- [ ] 4.2 Create `client/src/utils/provenanceTrigger.ts` — `openProvenanceLightbox` + `openProvenanceInTab`
-- [ ] 4.3 Create `client/src/components/ProvenanceBadge.tsx` — focusable pill; aria-label for text-only
-- [ ] 4.4 Create `client/src/hooks/useTextChunkSearch.ts` — PDF.js text-layer search first 80 chars; null on miss
-- [ ] 4.5 Modify `InlineCitationText.jsx` — add `role="button"`, `data-provenance-trigger`, `data-fact-id`; click/Cmd-click/Enter routing
-- [ ] 4.6 Modify `client/src/pages/LibraryPage.tsx` — render `<ProvenanceBadge />` for text-only facts
-- [ ] 4.7 Modify `client/src/pages/ResearchBrainPage.tsx` — same badge insertion on the evidence pack
-- [ ] 4.8 Modify `client/src/index.jsx` — wrap `Root` with `<ProvenanceProvider>` in both shells
-- [ ] 4.9 Append badge styles to `client/src/styles/provenance.css`
-- [ ] 4.10 Create `client/src/hooks/__tests__/useTextChunkSearch.test.ts` — text-layer hit, graceful miss
+- [x] 4.1 Create `client/src/contexts/ProvenanceContext.tsx` — provider + lightbox; `openLightbox` / `openInTab`
+- [x] 4.2 Create `client/src/utils/provenanceTrigger.ts` — `openProvenanceLightbox` + `openProvenanceInTab`
+- [x] 4.3 Create `client/src/components/ProvenanceBadge.tsx` — focusable pill; aria-label for text-only
+- [x] 4.4 Create `client/src/hooks/useTextChunkSearch.ts` — PDF.js text-layer search first 80 chars; null on miss
+- [x] 4.5 Modify `InlineCitationText.jsx` — add `role="button"`, `data-provenance-trigger`, `data-fact-id`; click/Cmd-click/Enter routing
+- [x] 4.6 Modify `client/src/pages/LibraryPage.tsx` — render `<ProvenanceBadge />` for text-only facts
+- [x] 4.7 Modify `client/src/pages/ResearchBrainPage.tsx` — same badge insertion on the evidence pack
+- [x] 4.8 Modify `client/src/index.jsx` — wrap `Root` with `<ProvenanceProvider>` in both shells
+- [x] 4.9 Append badge styles to `client/src/styles/provenance.css`
+- [x] 4.10 Create `client/src/hooks/__tests__/useTextChunkSearch.test.ts` — text-layer hit, graceful miss
 
 ## Phase 5: Verification (PR #3 final)
 
-- [ ] 5.1 Run `bun test`; cross-check every Given/When/Then scenario from the three specs against executed tests or route-level smoke
-- [ ] 5.2 Verify `src/services/files/index.ts` + `src/services/researchBrain/index.ts` re-export new symbols
-- [ ] 5.3 Add short note to `CLAUDE.md` under "Deep Research" — citation click opens lightbox; "Open in tab" navigates to `/viewer/:sourceId#...`; reload preserves hash
+- [x] 5.1 Run `bun test`; cross-check every Given/When/Then scenario from the three specs against executed tests or route-level smoke
+- [x] 5.2 Verify `src/services/files/index.ts` + `src/services/researchBrain/index.ts` re-export new symbols
+- [x] 5.3 Add short note to `CLAUDE.md` under "Deep Research" — citation click opens lightbox; "Open in tab" navigates to `/viewer/:sourceId#...`; reload preserves hash
 
 ## Relevant Files
 

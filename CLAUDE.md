@@ -128,6 +128,26 @@ YOU MUST:
 - Include all DOI-backed citations in the bibliography
 - Link figures and artifacts to their source analysis tasks
 
+#### Provenance Viewer (bioprospecting-pdf-provenance-viewer PR #3)
+
+- A fact citation click opens the inline **EvidenceLightbox** by
+  default; Ctrl/Cmd-click (or the "Open in tab" button in the
+  lightbox) navigates to the dedicated viewer
+  `/viewer/:sourceId#bbox=…&page=…&type=…` in a new tab.
+- Citations in chat messages carry `data-provenance-trigger` and
+  `data-fact-id` so the global `ProvenanceProvider` can resolve
+  the right fact. The lightbox mounts at the provider's level
+  (both `LegacyAppShell` and `CoralAppShell`), so the trigger
+  works from any page.
+- For facts that have a `chunk_id` but no `evidence_table_id` /
+  `evidence_figure_id`, the lightbox uses
+  `useTextChunkSearch` to locate the chunk's first 80 chars on
+  the page (yellow highlight) and shows the
+  `provenance: text-only` badge when the search misses.
+- Reloading the dedicated viewer preserves the URL hash — the
+  bbox, page, and type are all restored from `#bbox=…,#page=…,
+  #type=…`. The hash is also deep-linkable for sharing.
+
 ---
 
 ## Tech Stack

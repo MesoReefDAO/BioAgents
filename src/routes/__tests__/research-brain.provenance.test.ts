@@ -120,7 +120,15 @@ function setMockStorage(storage: any) {
 // client is consulted through `getServiceClient()`; the storage
 // provider is consulted through `getStorageProvider()`. Both
 // functions are exported from their respective index files.
-mock.module("../../../db/client", () => ({
+//
+// Path note: the test lives at
+//   src/routes/__tests__/research-brain.provenance.test.ts
+// so `../../db/client` reaches `src/db/client.ts` (the same module
+// the route imports via `../db/client`) and `../../storage` reaches
+// `src/storage/index.ts`. Using `../../../…` here would point above
+// the repo root and silently miss the mock — the route would then
+// fall through to the real Supabase / storage clients.
+mock.module("../../db/client", () => ({
   getServiceClient: () =>
     (globalThis.__provenanceViewerTestClient ?? (() => null))(),
   getAnonClient: () =>
@@ -132,7 +140,7 @@ mock.module("../../../db/client", () => ({
     (globalThis.__provenanceViewerTestClient ?? (() => null))(),
 }));
 
-mock.module("../../../storage", () => ({
+mock.module("../../storage", () => ({
   getStorageProvider: () => globalThis.__provenanceViewerTestStorage ?? null,
   isStorageProviderAvailable: () =>
     globalThis.__provenanceViewerTestStorage != null,

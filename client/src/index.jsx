@@ -6,6 +6,7 @@ import { usePrivy } from '@privy-io/react-auth';
 import { CDPProvider } from './providers/CDPProvider';
 import { CoralPrivyProvider } from './providers/PrivyProvider';
 import { AuthProvider } from './contexts';
+import { ProvenanceProvider } from './contexts/ProvenanceContext';
 import { LoginPage, ChatPage, LandingPage, AccessPendingPage, LibraryPage, PaperPage, ResearchBrainPage, CorpusDashboardPage, ViewerPage, LibraryViewerPage } from './pages';
 import { useAuth } from './hooks';
 import './styles/global.css';
@@ -168,7 +169,9 @@ function Root() {
     return (
       <AuthProvider>
         <CoralPrivyProvider appId={privyAppId}>
-          <CoralAppShell />
+          <ProvenanceProvider>
+            <CoralAppShell />
+          </ProvenanceProvider>
         </CoralPrivyProvider>
       </AuthProvider>
     );
@@ -178,7 +181,9 @@ function Root() {
     return (
       <AuthProvider>
         <CDPProvider>
-          <LegacyAppShell />
+          <ProvenanceProvider>
+            <LegacyAppShell />
+          </ProvenanceProvider>
         </CDPProvider>
       </AuthProvider>
     );
@@ -186,7 +191,9 @@ function Root() {
 
   return (
     <AuthProvider>
-      <LegacyAppShell />
+      <ProvenanceProvider>
+        <LegacyAppShell />
+      </ProvenanceProvider>
     </AuthProvider>
   );
 }

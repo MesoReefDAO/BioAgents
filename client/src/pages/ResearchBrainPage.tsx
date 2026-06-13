@@ -1,6 +1,8 @@
 import { route } from "preact-router";
 import { useState } from "preact/hooks";
 import { Icon } from "../components/icons";
+import { ProvenanceBadge } from "../components/ProvenanceBadge";
+import { openProvenanceLightbox } from "../utils/provenanceTrigger";
 import {
   reextractResearchBrainSource,
   ResearchBrainBioprospectingFact,
@@ -712,6 +714,40 @@ export function ResearchBrainPage({ coralGptMode = false }: Props) {
 
                         <div className="brain-fact-source">
                           <span>{fact.sourceTitle || "Fuente interna"}</span>
+                          {/*
+                            PR #3 — provenance affordance on fact
+                            cards. The badge is the keyboard-
+                            focusable entry point to the lightbox;
+                            its visible label changes from
+                            "provenance: text-only" to "view
+                            source" so the user knows it's an
+                            action, not a status. The lightbox
+                            header re-asserts the text-only status
+                            when applicable.
+                          */}
+                          <ProvenanceBadge
+                            kind="text-only"
+                            variant="card"
+                            label="view source"
+                            ariaLabel={`View source PDF for fact ${fact.id}`}
+                            onActivate={(event) => {
+                              // Anchor the badge to the fact id
+                              // so the ProvenanceProvider can
+                              // open the lightbox for the right
+                              // fact. The badge does not know
+                              // about a per-fact sourceId; the
+                              // lightbox resolves it from the
+                              // provenance payload.
+                              const target =
+                                (event?.currentTarget as HTMLElement | undefined) ??
+                                null;
+                              openProvenanceLightbox(
+                                fact.id,
+                                fact.evidenceTableId ?? null,
+                                target,
+                              );
+                            }}
+                          />
                           {fact.doiUrl && (
                             <a
                               href={fact.doiUrl}

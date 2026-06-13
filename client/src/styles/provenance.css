@@ -29,15 +29,41 @@
   font-size: 11px;
   font-weight: 500;
   line-height: 1.4;
-  color: #a1a1a1;
+  color: #a1a1aa;
   background: rgba(255, 255, 255, 0.06);
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 999px;
   text-transform: lowercase;
   letter-spacing: 0.01em;
+  cursor: pointer;
+  user-select: none;
+}
+.provenance-badge:focus-visible {
+  outline: 2px solid #3b82f6;
+  outline-offset: 2px;
+}
+.provenance-badge:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: #ededed;
 }
 .provenance-badge--inline {
   margin-left: 12px;
+}
+/* Card variant: when the badge sits next to a source title on a
+   fact card, it gets a touch more breathing room and a subtle
+   "link" affordance so users notice it as an action. */
+.provenance-badge--card {
+  margin-left: 8px;
+  font-variant: small-caps;
+  letter-spacing: 0.04em;
+  background: rgba(59, 130, 246, 0.08);
+  border-color: rgba(59, 130, 246, 0.25);
+  color: #93c5fd;
+}
+.provenance-badge--card:hover {
+  background: rgba(59, 130, 246, 0.18);
+  border-color: rgba(59, 130, 246, 0.45);
+  color: #dbeafe;
 }
 
 /* ---- Evidence viewer (shared PDF.js mount) ---- */

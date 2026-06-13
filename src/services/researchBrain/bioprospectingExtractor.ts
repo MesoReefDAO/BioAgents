@@ -6,6 +6,10 @@ import {
   type ExtractedTable,
 } from "../files/pdfTableExtractor";
 import {
+  attachCompoundAuthority,
+  loadAliasMap,
+} from "./compoundAuthority";
+import {
   getSource,
   replaceBioprospectingFactsForSource,
   setSourceBioprospectingStatus,
@@ -401,9 +405,28 @@ export async function extractBioprospectingFactsForSource(
 
     const finalFacts =
       facts.length > 0 ? facts : heuristicFactsFromChunks(selectedChunks);
+
+    // Stamp compound authority on every fact before persistence. The
+    // alias map is loaded once per source (one SQL round-trip) and
+    // threaded through the per-fact resolver. A bad fact (e.g. a
+    // non-string compound) falls back to `pending` inside
+    // `attachCompoundAuthority`; the batch is never aborted.
+    let aliasMap: Map<string, string> = new Map();
+    try {
+      aliasMap = await loadAliasMap();
+    } catch (error) {
+      logger.warn(
+        { err: error, sourceId },
+        "bioprospecting_alias_map_load_failed_continuing",
+      );
+    }
+    const stampedFacts = finalFacts.map((fact) =>
+      attachCompoundAuthority(fact, aliasMap),
+    );
+
     const saved = await replaceBioprospectingFactsForSource(
       source,
-      finalFacts,
+      stampedFacts,
       chunks,
     );
 

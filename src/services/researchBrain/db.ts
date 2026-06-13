@@ -511,6 +511,18 @@ export async function replaceBioprospectingFactsForSource(
         doi: source.doi || null,
         page: chunk?.page || null,
         evidence_table_id: evidenceTableId,
+        // Compound authority columns — stamped by
+        // `attachCompoundAuthority` in the extractor before this
+        // function is called. The raw `compound` text above is
+        // NEVER overwritten by the canonical name; these columns
+        // are a parallel signal. `compound_authority_attempts`
+        // defaults to 0 on fresh inserts.
+        compound_canonical_id: fact.compound_canonical_id ?? null,
+        compound_authority_status:
+          fact.compound_authority_status ?? "pending",
+        compound_authority_at: fact.compound_authority_at ?? null,
+        compound_authority_error: fact.compound_authority_error ?? null,
+        compound_authority_attempts: fact.compound_authority_attempts ?? 0,
         metadata: {
           entities: fact.entities || [],
           extractor: "bioprospectingExtractor",

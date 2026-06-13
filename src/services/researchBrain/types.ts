@@ -299,6 +299,44 @@ export type BioprospectingFact = {
    * (after `evidence_table_id`).
    */
   evidence_figure_id?: string | null;
+  /**
+   * FK to the canonical row in `research_compounds` that this fact's
+   * `compound` text was resolved to. `null` for unknown / extract /
+   * not-yet-resolved facts. The raw `compound` text is never
+   * overwritten; this column is a parallel signal for UI display and
+   * admin views. Set by `attachCompoundAuthority` (extractor sync
+   * path) or `attachCanonicalToFact` (worker + admin paths).
+   */
+  compound_canonical_id?: string | null;
+  /**
+   * Lifecycle marker for the fact's compound-authority state.
+   * `'pending'` is the default for fresh inserts; `'verified'` is set
+   * on alias-table or PubChem hit; `'skipped'` is set when the
+   * `looksLikeExtract` predicate matches the raw `compound` text;
+   * `'failed'` is reserved for the backfill worker's exhaustion case
+   * (5 PubChem 404s in 24h). Source: `compound_authority_audit`.
+   */
+  compound_authority_status?: CompoundStatus;
+  /**
+   * Server timestamp of the last authority action on this fact.
+   * `null` for facts that have never been resolved (and for
+   * `'pending'` fresh inserts). The backfill worker's 24h re-check
+   * window reads this column to decide whether a fact is eligible
+   * for another attempt.
+   */
+  compound_authority_at?: string | null;
+  /**
+   * Last error message for the authority attempt (e.g. PubChem 404
+   * excerpt). `null` on success and on `'skipped'`.
+   */
+  compound_authority_error?: string | null;
+  /**
+   * Operational counter incremented on each backfill miss. Survives
+   * worker restart. Drives the 5-retry-then-`failed` policy in
+   * `compoundAuthority.normalizeBioprospectingCompounds` (PR #2).
+   * 5th column added in the same migration as the 4 spec'd ones.
+   */
+  compound_authority_attempts?: number;
   source?: ResearchSource;
   chunk?: ResearchEvidenceChunk;
 };
@@ -338,6 +376,79 @@ export type ResearchTaxonAlias = {
   source: string;
   metadata?: Record<string, unknown>;
   created_at?: string;
+};
+
+/**
+ * Lifecycle marker for a fact's compound-authority state. Mirrors
+ * the `compound_authority_status` CHECK constraint on
+ * `research_bioprospecting_facts`. Used by
+ * `src/services/researchBrain/compoundAuthority.ts` and surfaced in
+ * audit JSONB payloads.
+ */
+export type CompoundStatus = "pending" | "verified" | "failed" | "skipped";
+
+/**
+ * A canonical chemistry identity. One row per molecule the Research
+ * Brain has resolved. The `normalized_name` is the dedup key; the
+ * `status` records provenance (`'curated'`, `'pubchem'`, `'manual'`,
+ * `'local'`, `'chebi'`).
+ */
+export type ResearchCompound = {
+  id: string;
+  canonical_name: string;
+  normalized_name: string;
+  inchi_key: string | null;
+  pubchem_cid: number | null;
+  chebi_id: number | null;
+  molecular_formula: string | null;
+  iupac_name: string | null;
+  compound_kind: "small_molecule" | "peptide" | "protein" | "lipid" | "other";
+  status: "local" | "pubchem" | "chebi" | "manual" | "curated";
+  external_ids: Record<string, unknown>;
+  metadata: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+};
+
+/**
+ * A surface form (synonym, trade name, IUPAC name, reviewer spelling
+ * variant) that resolves to a canonical compound. The fast lookup
+ * path that avoids a PubChem round-trip on every extraction.
+ */
+export type ResearchCompoundAlias = {
+  id: string;
+  compound_id: string;
+  alias: string;
+  normalized_alias: string;
+  source: "local_extraction" | "pubchem" | "chebi" | "manual" | "curated";
+  confidence: "high" | "medium" | "low";
+  metadata: Record<string, unknown>;
+  created_at: string;
+};
+
+/**
+ * Structured JSONB-diff audit row from `compound_authority_audit`.
+ * Read-rare (admin only), insert-heavy (every status change and
+ * manual edit). The table is partitioned monthly by `created_at`.
+ *
+ * `event_type` discriminates the kind of change:
+ *   - `'status_change'`: a fact transitioned (e.g. pending -> verified)
+ *   - `'manual_edit'`:    a human edited `fact.compound` text
+ *   - `'manual_alias_add'`: an admin added a new alias
+ *
+ * `old_value` / `new_value` shapes vary by `event_type`; see
+ * `openspec/changes/bioprospecting-compound-authority/specs/...`
+ * for the exact contract.
+ */
+export type CompoundAuthorityAuditEvent = {
+  id: string;
+  fact_id: string;
+  event_type: "status_change" | "manual_edit" | "manual_alias_add";
+  old_value: Record<string, unknown> | null;
+  new_value: Record<string, unknown> | null;
+  user_id: string | null;
+  reason: string | null;
+  created_at: string;
 };
 
 export type ExtractedBioprospectingFact = {
@@ -395,6 +506,26 @@ export type ExtractedBioprospectingFact = {
     tableIndex: number;
     rowIndex?: number;
   };
+  /**
+   * Compound authority state, stamped by `attachCompoundAuthority`
+   * in the extractor before the fact is handed to
+   * `replaceBioprospectingFactsForSource`. The raw `compound` text
+   * is NEVER overwritten; these fields are a parallel signal.
+   *
+   * On a fresh extraction the resolver sets:
+   *   - alias-table hit  -> status='verified', canonicalId=<id>, at=NOW()
+   *   - extract value    -> status='skipped', canonicalId=null, error='extract_or_mixture'
+   *   - miss             -> status='pending', canonicalId=null, error=null
+   *
+   * Calling `attachCompoundAuthority` twice on the same fact is a
+   * no-op on a previously-stamped `'verified'` state (the second
+   * call does not clobber it with a `'pending'` re-resolution).
+   */
+  compound_canonical_id?: string | null;
+  compound_authority_status?: CompoundStatus;
+  compound_authority_at?: string | null;
+  compound_authority_error?: string | null;
+  compound_authority_attempts?: number;
 };
 
 export type ResearchBioprospectingContradiction = {

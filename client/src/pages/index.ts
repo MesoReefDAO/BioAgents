@@ -11,3 +11,5 @@ export { LibraryPage } from './LibraryPage';
 export { PaperPage } from './PaperPage';
 export { ResearchBrainPage } from './ResearchBrainPage';
 export { CorpusDashboardPage } from './CorpusDashboardPage';
+export { ViewerPage } from './ViewerPage';
+export { LibraryViewerPage } from './LibraryViewerPage';

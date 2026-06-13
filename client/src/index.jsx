@@ -6,12 +6,13 @@ import { usePrivy } from '@privy-io/react-auth';
 import { CDPProvider } from './providers/CDPProvider';
 import { CoralPrivyProvider } from './providers/PrivyProvider';
 import { AuthProvider } from './contexts';
-import { LoginPage, ChatPage, LandingPage, AccessPendingPage, LibraryPage, PaperPage, ResearchBrainPage, CorpusDashboardPage } from './pages';
+import { LoginPage, ChatPage, LandingPage, AccessPendingPage, LibraryPage, PaperPage, ResearchBrainPage, CorpusDashboardPage, ViewerPage, LibraryViewerPage } from './pages';
 import { useAuth } from './hooks';
 import './styles/global.css';
 import './styles/coralgpt.css';
 import './styles/library.css';
 import './styles/corpus.css';
+import './styles/provenance.css';
 
 function LoadingScreen() {
   return (
@@ -68,6 +69,8 @@ function LegacyAppShell() {
       <ChatPage path="/chat/:sessionId?" />
       <LibraryPage path="/library" />
       <PaperPage path="/library/:docId" />
+      <LibraryViewerPage path="/library/:docId/viewer" />
+      <ViewerPage path="/viewer/:sourceId" />
       <ResearchBrainPage path="/brain" />
       <CorpusDashboardPage path="/corpus" />
       <Redirect path="/" to="/chat" />
@@ -114,6 +117,8 @@ function CoralAppShell() {
       <ChatPage path="/chat/:sessionId?" coralGptMode privyLogout={privyLogout} />
       <LibraryPage path="/library" coralGptMode />
       <PaperPage path="/library/:docId" coralGptMode />
+      <LibraryViewerPage path="/library/:docId/viewer" coralGptMode />
+      <ViewerPage path="/viewer/:sourceId" coralGptMode />
       <ResearchBrainPage path="/brain" coralGptMode />
       <NotFound default redirectTo="/" />
     </Router>

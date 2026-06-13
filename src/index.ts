@@ -194,6 +194,30 @@ const app = new Elysia()
     });
   })
 
+  // Serve the pdfjs-dist worker used by the PDF provenance viewer.
+  // The frontend bundle imports `pdfjs-dist/build/pdf.mjs` and sets
+  // `GlobalWorkerOptions.workerSrc = "/pdfjs/pdf.worker.mjs"` (see
+  // `client/src/lib/pdfjs.ts`). We pin the standard build, not the
+  // legacy build, because the viewer needs the worker for
+  // responsive rendering on multi-page research PDFs.
+  .get("/pdfjs/pdf.worker.mjs", () => {
+    return new Response(
+      Bun.file("node_modules/pdfjs-dist/build/pdf.worker.mjs"),
+      {
+        headers: {
+          // Workers must be served as JS for the browser to execute
+          // them; `.mjs` keeps the import/export semantics intact.
+          "Content-Type": "application/javascript",
+          // The worker bundle is large but stable; cache it for one
+          // day at the edge. The frontend bundle re-references the
+          // same URL across page loads, so this saves a round-trip
+          // on every viewer open.
+          "Cache-Control": "public, max-age=86400",
+        },
+      },
+    );
+  })
+
   // Serve the bundled CSS file
   .get("/index.css", () => {
     return new Response(Bun.file("client/dist/index.css"), {

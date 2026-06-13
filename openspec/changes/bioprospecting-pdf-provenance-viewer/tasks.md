@@ -47,26 +47,37 @@ Chain strategy: feature-branch-chain
 
 ## Phase 2: Backend Viewer Endpoints (PR #2)
 
-- [ ] 2.1 Add `GET /api/research-brain/sources/:sourceId/evidence` to `src/routes/research-brain.ts`
-- [ ] 2.2 Add `GET /api/research-brain/sources/:sourceId/pdf` — `getStorageProvider().download(file_path)`, stream PDF inline; 404/502/413
-- [ ] 2.3 Add `GET /api/research-brain/facts/:factId/provenance` — precedence `table → figure → chunk → text-only`; 404 unknown fact
+> **v2 note (2026-06-13):** the three backend endpoints (2.1, 2.2,
+> 2.3) and their unit test suite landed in PR #1's commit
+> (`4d2ffd6`) along with the extraction pipeline. The implementation
+> matches the design's §6 contracts exactly:
+> - `src/routes/research-brain.ts` lines 1012–1350 (3 routes added)
+> - `src/routes/__tests__/research-brain.provenance.test.ts` (route-level
+>   smoke tests covering 404, 502, 413, ordering, precedence)
+> The apply phase for PR #2 only needs to mark these complete and
+> move to the frontend work (Phase 3).
+
+- [x] 2.1 Add `GET /api/research-brain/sources/:sourceId/evidence` to `src/routes/research-brain.ts`
+- [x] 2.2 Add `GET /api/research-brain/sources/:sourceId/pdf` — `getStorageProvider().download(file_path)`, stream PDF inline; 404/502/413
+- [x] 2.3 Add `GET /api/research-brain/facts/:factId/provenance` — precedence `table → figure → chunk → text-only`; 404 unknown fact
 
 ## Phase 3: Frontend Viewer (PR #2)
 
-- [ ] 3.1 Add `pdfjs-dist` to `package.json`
-- [ ] 3.2 Create `client/src/lib/pdfjs.ts` — `GlobalWorkerOptions.workerSrc` via `import.meta.url`
-- [ ] 3.3 Create `client/src/lib/bbox.ts` — `PDFJS_RENDER_SCALE = 1.5`; `bboxToPixels(bbox)`
-- [ ] 3.4 Create `client/src/hooks/useProvenance.ts` — fetch `facts/:id/provenance`
-- [ ] 3.5 Create `client/src/hooks/useSourceEvidence.ts` — fetch `sources/:id/evidence`
-- [ ] 3.6 Create `client/src/hooks/usePdfDocument.ts` — wrap `pdfjsLib.getDocument`; `goToPage(n)`
-- [ ] 3.7 Create `client/src/components/EvidenceViewer.tsx` — render PDF at 1.5×; reads bbox/type from URL hash or prop
-- [ ] 3.8 Create `client/src/components/BboxOverlay.tsx` — table (blue) | figure (purple) | chunk (yellow) | text-only (no div)
-- [ ] 3.9 Create `client/src/components/EvidenceLightbox.tsx` — modal; Esc closes; custom focus trap; "Open in tab"
-- [ ] 3.10 Create `client/src/pages/ViewerPage.tsx` — `/viewer/:sourceId`
-- [ ] 3.11 Create `client/src/pages/LibraryViewerPage.tsx` — `/library/:docId/viewer`
-- [ ] 3.12 Modify `client/src/pages/index.ts` — export both new pages
-- [ ] 3.13 Modify `client/src/index.jsx` — register both routes in `LegacyAppShell` and `CoralAppShell`
-- [ ] 3.14 Create `client/src/styles/provenance.css` — lightbox backdrop, highlight colors, focus-trap outline
+- [x] 3.1 Add `pdfjs-dist` to `package.json`
+- [x] 3.2 Create `client/src/lib/pdfjs.ts` — `GlobalWorkerOptions.workerSrc = "/pdfjs/pdf.worker.mjs"` (absolute path; worker served by backend)
+- [x] 3.3 Create `client/src/lib/bbox.ts` — `PDFJS_RENDER_SCALE = 1.5`; `bboxToPixels(bbox)`
+- [x] 3.4 Create `client/src/hooks/useProvenance.ts` — fetch `facts/:id/provenance` + `parseViewerHash` / `buildViewerHash` helpers
+- [x] 3.5 Create `client/src/hooks/useSourceEvidence.ts` — fetch `sources/:id/evidence`
+- [x] 3.6 Create `client/src/hooks/usePdfDocument.ts` — wrap `pdfjsLib.getDocument`; `goToPage(n)`; `destroy()` on unmount
+- [x] 3.7 Create `client/src/components/EvidenceViewer.tsx` — render PDF at 1.5×; reads bbox/type from URL hash or prop; cancel-in-flight render; text-layer for selection+copy
+- [x] 3.8 Create `client/src/components/BboxOverlay.tsx` — table (blue) | figure (purple) | chunk (yellow) | text-only (no div)
+- [x] 3.9 Create `client/src/components/EvidenceLightbox.tsx` — modal; Esc closes; custom focus trap (~20 LOC); "Open in tab"
+- [x] 3.10 Create `client/src/pages/ViewerPage.tsx` — `/viewer/:sourceId`
+- [x] 3.11 Create `client/src/pages/LibraryViewerPage.tsx` — `/library/:docId/viewer` (resolves docId → sourceId via `usePaperMeta`)
+- [x] 3.12 Modify `client/src/pages/index.ts` — export both new pages
+- [x] 3.13 Modify `client/src/index.jsx` — register both routes in `LegacyAppShell` and `CoralAppShell`
+- [x] 3.14 Create `client/src/styles/provenance.css` — lightbox backdrop, highlight colors, focus-trap outline
+- [x] 3.15 Modify `src/index.ts` — serve `/pdfjs/pdf.worker.mjs` (pins the standard build, not the legacy build, for the worker)
 
 ## Phase 4: Text-Chunk Fallback + Badges (PR #3)
 

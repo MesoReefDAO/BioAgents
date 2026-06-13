@@ -38,10 +38,10 @@ Chain strategy: pending
 
 ## Phase 3: Search Filter + Backfill + Tests (PR 3)
 
-- [ ] 3.1 Add `includeDuplicates?: boolean` (default false) to `BioprospectingFactSearchParams` in `db.ts`. In `searchBioprospectingFacts` `selectFacts()` (line 663) apply `request.not("id", "in", "(SELECT merged_fact_id FROM research_bioprospecting_fact_edges)")` when flag is absent/false. JSDoc warns callers.
-- [ ] 3.2 Add `backfillBioprospectingFactDedup({ limit, batchSize, dryRun })` to `db.ts`: read facts where `id NOT IN (SELECT merged_fact_id FROM edges)` ordered by `(created_at, id)`, compute `buildIdentityKey` in-memory, group by key (skip nulls), apply canonical rule, in `--apply` mode insert edges `ON CONFLICT (canonical_fact_id, merged_fact_id) DO NOTHING`. Return `{ scannedFacts, groupsFound, edgesProposed, edgesInserted, edgesSkipped, examples: 10 }`.
-- [ ] 3.3 Create `scripts/backfill-dedupe-bioprospecting-facts.ts` mirroring `normalize-measurements.ts`: CLI `--dry-run` (default), `--apply`, `--limit=N` (500), `--batch-size=N` (500). Call the helper from 3.2 and log JSON.
-- [ ] 3.4 Add `export * from "./normalize";` to `src/services/researchBrain/index.ts`.
-- [ ] 3.5 Create `src/services/researchBrain/__tests__/normalize.test.ts` (mirror `contradictionDetector.test.ts`): diacritic fold; casing/punctuation collapse (dash→space); chemically distinct compounds stay distinct; null-key on all-blank; high-cardinality fields excluded; 5-tuple shape; stable re-runs.
-- [ ] 3.6 Add unit tests for canonical precedence (verified > `updated_at` > `source_id` > `id`), `getDuplicateGroup` from either side, `findMergedFactIds` subset.
-- [ ] 3.7 Run `bun run build:client`, `bun test src/services/researchBrain/__tests__/`, verify `bun run start` boots and `contradictionDetector.test.ts` passes.
+- [x] 3.1 Add `includeDuplicates?: boolean` (default false) to `BioprospectingFactSearchParams` in `db.ts`. In `searchBioprospectingFacts` `selectFacts()` (line 663) apply `request.not("id", "in", "(SELECT merged_fact_id FROM research_bioprospecting_fact_edges)")` when flag is absent/false. JSDoc warns callers.
+- [x] 3.2 Add `backfillBioprospectingFactDedup({ limit, batchSize, dryRun })` to `db.ts`: read facts where `id NOT IN (SELECT merged_fact_id FROM edges)` ordered by `(created_at, id)`, compute `buildIdentityKey` in-memory, group by key (skip nulls), apply canonical rule, in `--apply` mode insert edges `ON CONFLICT (canonical_fact_id, merged_fact_id) DO NOTHING`. Return `{ scannedFacts, groupsFound, edgesProposed, edgesInserted, edgesSkipped, examples: 10 }`.
+- [x] 3.3 Create `scripts/backfill-dedupe-bioprospecting-facts.ts` mirroring `normalize-measurements.ts`: CLI `--dry-run` (default), `--apply`, `--limit=N` (500), `--batch-size=N` (500). Call the helper from 3.2 and log JSON.
+- [x] 3.4 Add `export * from "./normalize";` to `src/services/researchBrain/index.ts`.
+- [x] 3.5 Create `src/services/researchBrain/__tests__/normalize.test.ts` (mirror `contradictionDetector.test.ts`): diacritic fold; casing/punctuation collapse (dash→space); chemically distinct compounds stay distinct; null-key on all-blank; high-cardinality fields excluded; 5-tuple shape; stable re-runs.
+- [x] 3.6 Add unit tests for canonical precedence (verified > `updated_at` > `source_id` > `id`), `getDuplicateGroup` from either side, `findMergedFactIds` subset.
+- [x] 3.7 Run `bun run build:client`, `bun test src/services/researchBrain/__tests__/`, verify `bun run start` boots and `contradictionDetector.test.ts` passes.

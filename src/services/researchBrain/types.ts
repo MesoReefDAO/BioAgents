@@ -283,6 +283,22 @@ export type BioprospectingFact = {
    * facts. Inverse of `research_bioprospecting_fact_edges.merged_fact_id`.
    */
   merged_into_fact_id?: string | null;
+  /**
+   * FK to the row in `research_evidence_tables` that this fact was
+   * extracted from (when the LLM grounded the fact in a specific
+   * table row). `null` for prose-grounded facts and for facts whose
+   * source PDF has not been table-extracted yet. The
+   * `/api/research-brain/facts/:id/provenance` endpoint (PR #2)
+   * uses this column as the first-precedence provenance link.
+   */
+  evidence_table_id?: string | null;
+  /**
+   * FK to the row in `research_evidence_figures` that this fact was
+   * extracted from. `null` for table/prose-grounded facts. The
+   * provenance endpoint treats this as the second-precedence link
+   * (after `evidence_table_id`).
+   */
+  evidence_figure_id?: string | null;
   source?: ResearchSource;
   chunk?: ResearchEvidenceChunk;
 };
@@ -357,6 +373,28 @@ export type ExtractedBioprospectingFact = {
   quote?: string;
   chunkIndex?: number;
   entities?: string[];
+  /**
+   * Optional reference to a specific cell in a specific table
+   * extracted from the source PDF. Set by the LLM when it grounds a
+   * fact in tabular data; resolved to a `evidence_table_id` (UUID)
+   * in `replaceBioprospectingFactsForSource` and threaded into the
+   * persisted row.
+   *
+   * Coordinates:
+   *   - `page`: 1-indexed PDF page
+   *   - `tableIndex`: 0-based ordinal of the table on the page
+   *   - `rowIndex`: 0-based ordinal of the row in the table body
+   *     (header rows do not count; row 0 is the first data row)
+   *
+   * The `page` + `tableIndex` pair is sufficient to look up the
+   * `evidence_table_id`; `rowIndex` is recorded for future
+   * cell-level provenance but not required for the FK link today.
+   */
+  sourceTableRef?: {
+    page: number;
+    tableIndex: number;
+    rowIndex?: number;
+  };
 };
 
 export type ResearchBioprospectingContradiction = {
@@ -366,8 +404,18 @@ export type ResearchBioprospectingContradiction = {
   conflicting_fact_id: string;
   contradiction_type: string;
   evidence_pack: {
-    source_a: { fact_id: string; source: string; value: string; provenance: string };
-    source_b: { fact_id: string; source: string; value: string; provenance: string };
+    source_a: {
+      fact_id: string;
+      source: string;
+      value: string;
+      provenance: string;
+    };
+    source_b: {
+      fact_id: string;
+      source: string;
+      value: string;
+      provenance: string;
+    };
     conflict_summary: string;
   };
   rule_version: string | null;

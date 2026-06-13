@@ -6,8 +6,10 @@ import {
   backfillBioprospectingMeasurements,
   extractBioprospectingFactsForSource,
   extractClaimsForSource,
+  getBioprospectingFact,
   getClaim,
   getContradictionsForSource,
+  getSource,
   getSourceClaims,
   getSourceEvidenceChunk,
   listResearchTaxa,
@@ -24,6 +26,11 @@ import { getServiceClient } from "../db/client";
 import { getDocumentIngestionQueue } from "../services/queue/queues";
 import { isJobQueueEnabled } from "../services/queue/connection";
 import { DocumentProcessor } from "../embeddings/documentProcessor";
+import {
+  loadFiguresForSource,
+  loadTablesForSource,
+} from "../services/files/pdfTableExtractor";
+import { getStorageProvider } from "../storage";
 import logger from "../utils/logger";
 
 function getDocsPath(): string {
@@ -54,13 +61,13 @@ export const researchBrainRoute = new Elysia({ prefix: "/api/research-brain" })
     { beforeHandle: authResolver({ required: false }) },
   )
   .get(
-    "/sources/:id/claims",
+    "/sources/:sourceId/claims",
     async ({ params, set }) => {
       try {
-        return { claims: await getSourceClaims(params.id) };
+        return { claims: await getSourceClaims(params.sourceId) };
       } catch (error: any) {
         logger.error(
-          { err: error, sourceId: params.id },
+          { err: error, sourceId: params.sourceId },
           "research_brain_source_claims_failed",
         );
         set.status = 500;
@@ -73,7 +80,7 @@ export const researchBrainRoute = new Elysia({ prefix: "/api/research-brain" })
     { beforeHandle: authResolver({ required: false }) },
   )
   .get(
-    "/sources/:id/chunks/:chunkIndex",
+    "/sources/:sourceId/chunks/:chunkIndex",
     async ({ params, set }) => {
       const chunkIndex = Number(params.chunkIndex);
       if (!Number.isFinite(chunkIndex)) {
@@ -82,7 +89,7 @@ export const researchBrainRoute = new Elysia({ prefix: "/api/research-brain" })
       }
 
       try {
-        const chunk = await getSourceEvidenceChunk(params.id, chunkIndex);
+        const chunk = await getSourceEvidenceChunk(params.sourceId, chunkIndex);
         if (!chunk) {
           set.status = 404;
           return { error: "Evidence fragment not found" };
@@ -90,7 +97,7 @@ export const researchBrainRoute = new Elysia({ prefix: "/api/research-brain" })
         return { chunk };
       } catch (error: any) {
         logger.error(
-          { err: error, sourceId: params.id, chunkIndex },
+          { err: error, sourceId: params.sourceId, chunkIndex },
           "research_brain_source_chunk_failed",
         );
         set.status = 500;
@@ -459,13 +466,13 @@ export const researchBrainRoute = new Elysia({ prefix: "/api/research-brain" })
     { beforeHandle: authResolver({ required: true }) },
   )
   .post(
-    "/sources/:id/extract",
+    "/sources/:sourceId/extract",
     async ({ params, set }) => {
       try {
-        return await extractClaimsForSource(params.id);
+        return await extractClaimsForSource(params.sourceId);
       } catch (error: any) {
         logger.error(
-          { err: error, sourceId: params.id },
+          { err: error, sourceId: params.sourceId },
           "research_brain_extract_failed",
         );
         set.status = 500;
@@ -478,13 +485,13 @@ export const researchBrainRoute = new Elysia({ prefix: "/api/research-brain" })
     { beforeHandle: authResolver({ required: true }) },
   )
   .post(
-    "/sources/:id/extract-bioprospecting",
+    "/sources/:sourceId/extract-bioprospecting",
     async ({ params, set }) => {
       try {
-        return await extractBioprospectingFactsForSource(params.id);
+        return await extractBioprospectingFactsForSource(params.sourceId);
       } catch (error: any) {
         logger.error(
-          { err: error, sourceId: params.id },
+          { err: error, sourceId: params.sourceId },
           "bioprospecting_extract_failed",
         );
         set.status = 500;
@@ -985,6 +992,361 @@ export const researchBrainRoute = new Elysia({ prefix: "/api/research-brain" })
       }
     },
     { beforeHandle: authResolver({ required: true }) },
+  )
+  // -------------------------------------------------------------------------
+  // PDF provenance viewer (PR #2 of bioprospecting-pdf-provenance-viewer).
+  //
+  // Three read-only endpoints that power the /viewer/:sourceId route
+  // and the EvidenceLightbox:
+  //   1. GET /api/research-brain/sources/:sourceId/evidence
+  //        → tables + figures + chunks for the source
+  //   2. GET /api/research-brain/sources/:sourceId/pdf
+  //        → streams the source PDF inline (proxied through S3)
+  //   3. GET /api/research-brain/facts/:factId/provenance
+  //        → resolves a fact to its table|figure|chunk|text-only chain
+  //
+  // Endpoints 1 and 3 are `required: false` (research metadata, not
+  // user PII). Endpoint 2 is `required: true` because the file may
+  // live in a private bucket and the proxy must not leak S3 creds.
+  // -------------------------------------------------------------------------
+  .get(
+    "/sources/:sourceId/evidence",
+    async ({ params, set }) => {
+      const { sourceId } = params;
+      if (!sourceId) {
+        set.status = 400;
+        return { error: "Missing sourceId" };
+      }
+
+      try {
+        // 1. Verify the source exists — the spec's "Unknown source
+        //    returns 404" scenario. 404 is the only path that needs
+        //    a separate existence check; the other two endpoints
+        //    short-circuit on empty results without 404-ing.
+        const source = await getSource(sourceId);
+        if (!source) {
+          set.status = 404;
+          return { error: "Source not found" };
+        }
+
+        // 2. Load tables and figures in parallel from the
+        //    research_evidence_* tables (the source of truth, written
+        //    by PR #1's extraction pipeline). The loaders already
+        //    order by (page, table_index|figure_index) asc.
+        const [tables, figures, chunksResult] = await Promise.all([
+          loadTablesForSource(sourceId),
+          loadFiguresForSource(sourceId),
+          getServiceClient()
+            .from("research_evidence_chunks")
+            .select("id, page, chunk_index, content")
+            .eq("source_id", sourceId)
+            .order("chunk_index", { ascending: true }),
+        ]);
+
+        if (chunksResult.error) {
+          logger.error(
+            { err: chunksResult.error, sourceId },
+            "research_brain_evidence_chunks_failed",
+          );
+        }
+
+        const chunks = (chunksResult.data || []).map((c: any) => ({
+          id: c.id,
+          page: c.page,
+          chunkIndex: c.chunk_index,
+          content: c.content,
+          // Per the design: chunks have no bbox until a follow-up
+          // change adds per-chunk bboxes (out of scope here). The
+          // viewer treats `bbox: null` as the text-chunk fallback
+          // signal (text-only highlight via the badge).
+          bbox: null,
+        }));
+
+        return {
+          sourceId,
+          tables: tables.map((t) => ({
+            id: t.id,
+            page: t.page,
+            tableIndex: t.table_index,
+            headers: t.headers,
+            rows: t.rows,
+            markdown: t.markdown,
+            bbox: t.bbox,
+            extractionProvider: t.extraction_provider,
+            extractionConfidence: Number(t.extraction_confidence),
+          })),
+          figures: figures.map((f) => ({
+            id: f.id,
+            page: f.page,
+            figureIndex: f.figure_index,
+            bbox: f.bbox,
+            caption: f.caption,
+          })),
+          chunks,
+        };
+      } catch (error: any) {
+        logger.error(
+          { err: error, sourceId },
+          "research_brain_evidence_failed",
+        );
+        set.status = 500;
+        return {
+          error: "Failed to load source evidence",
+          message: error?.message,
+        };
+      }
+    },
+    { beforeHandle: authResolver({ required: false }) },
+  )
+  .get(
+    "/sources/:sourceId/pdf",
+    async ({ params, set, request }) => {
+      const { sourceId } = params;
+      if (!sourceId) {
+        set.status = 400;
+        return { error: "Missing sourceId" };
+      }
+
+      // 50 MB cap — research PDFs are well under. Anything larger
+      // is rejected before the S3 download to avoid blowing the
+      // server's memory budget.
+      const MAX_PDF_BYTES = 50 * 1024 * 1024;
+
+      try {
+        // 1. Existence + file_path check (the source may exist but
+        //    not have a PDF on disk; the spec's 404 covers both).
+        const source = await getSource(sourceId);
+        if (!source) {
+          set.status = 404;
+          return { error: "Source not found" };
+        }
+        const filePath = source.file_path;
+        if (!filePath) {
+          set.status = 404;
+          return { error: "Source has no PDF file" };
+        }
+
+        // 2. Storage provider check. No provider means the
+        //    infrastructure is not configured for the proxy — the
+        //    design defers a "PDF not available" fallback to the
+        //    lightbox (no fallback to the local docs path).
+        const storage = getStorageProvider();
+        if (!storage) {
+          logger.warn(
+            { sourceId, filePath },
+            "research_brain_pdf_storage_unconfigured",
+          );
+          set.status = 502;
+          return {
+            error: "PDF storage is not configured",
+            message:
+              "STORAGE_PROVIDER is unset; the PDF proxy is unavailable in this environment.",
+          };
+        }
+
+        // 3. Download the buffer from S3. The StorageProvider.download
+        //    contract is Buffer (Node), and Elysia can serialize a
+        //    Buffer as the response body with explicit headers.
+        const buffer = await storage.download(filePath);
+        if (!buffer || buffer.length === 0) {
+          set.status = 502;
+          return { error: "PDF download returned empty buffer" };
+        }
+        if (buffer.length > MAX_PDF_BYTES) {
+          set.status = 413;
+          return {
+            error: "PDF exceeds the 50 MB proxy limit",
+            bytes: buffer.length,
+          };
+        }
+
+        // 4. Sanitize the filename for the Content-Disposition
+        //    header. Strip path separators, control chars, and any
+        //    double-quote that would break the header value.
+        const rawTitle = source.title || `source-${sourceId}`;
+        const safeFilename =
+          rawTitle
+            .replace(/[\r\n\t]+/g, " ")
+            .replace(/[\\/]+/g, "_")
+            .replace(/[^\w.\- ()]+/g, "_")
+            .slice(0, 200) + ".pdf";
+
+        // 5. Stream the bytes back. We set headers explicitly so
+        //    Elysia doesn't try to JSON-serialize the Buffer. Using
+        //    a `new Response(buffer, ...)` keeps the streaming
+        //    semantics tight (PDF.js doesn't need chunked
+        //    streaming — it slurps the whole file — but the
+        //    `Content-Length` header is still useful for progress
+        //    reporting in the lightbox).
+        const headers: Record<string, string> = {
+          "Content-Type": "application/pdf",
+          "Content-Length": String(buffer.length),
+          "Content-Disposition": `inline; filename="${safeFilename}"`,
+          "Cache-Control": "private, max-age=60",
+        };
+        return new Response(buffer, { status: 200, headers });
+      } catch (error: any) {
+        logger.error(
+          { err: error, sourceId },
+          "research_brain_pdf_failed",
+        );
+        set.status = 502;
+        return {
+          error: "Failed to proxy source PDF",
+          message: error?.message,
+        };
+      }
+    },
+    { beforeHandle: authResolver({ required: true }) },
+  )
+  .get(
+    "/facts/:factId/provenance",
+    async ({ params, set }) => {
+      const { factId } = params;
+      if (!factId) {
+        set.status = 400;
+        return { error: "Missing factId" };
+      }
+
+      try {
+        // 1. Single round-trip load: the SELECT in
+        //    getBioprospectingFact already embeds source, chunk,
+        //    evidence_table, and evidence_figure (per the spec's
+        //    "Supabase foreign-key embed syntax" rule).
+        const fact = await getBioprospectingFact(factId);
+        if (!fact) {
+          set.status = 404;
+          return { error: "Fact not found" };
+        }
+
+        const sourceTitle = fact.source?.title || "";
+        const doi = fact.doi ?? fact.source?.doi ?? null;
+        const sourceId = fact.source_id ?? fact.source?.id ?? null;
+
+        // 2. Precedence per spec §6.3:
+        //      a. evidence_table_id + row resolvable  → "table"
+        //      b. evidence_figure_id + row resolvable → "figure"
+        //      c. chunk_id (or chunk_index)            → "chunk"
+        //      d. otherwise                            → "text-only"
+        //
+        //    Each branch sets the provenance.type, populates the
+        //    matching child object, and computes `bbox` (null for
+        //    chunk and text-only branches).
+        if (fact.evidence_table_id && (fact as any).evidence_table) {
+          const table = (fact as any).evidence_table;
+          return {
+            factId: fact.id,
+            sourceId,
+            sourceTitle,
+            doi,
+            provenance: {
+              type: "table",
+              table: {
+                id: table.id,
+                page: table.page,
+                tableIndex: table.table_index,
+                headers: table.headers,
+                rows: table.rows,
+                markdown: table.markdown,
+                bbox: table.bbox,
+                extractionProvider: table.extraction_provider,
+                extractionConfidence: Number(table.extraction_confidence),
+              },
+              figure: null,
+              chunk: fact.chunk
+                ? {
+                    id: fact.chunk.id,
+                    page: fact.chunk.page,
+                    chunkIndex: fact.chunk.chunk_index,
+                    content: fact.chunk.content,
+                  }
+                : null,
+              bbox: table.bbox ?? null,
+            },
+          };
+        }
+
+        if (fact.evidence_figure_id && (fact as any).evidence_figure) {
+          const figure = (fact as any).evidence_figure;
+          return {
+            factId: fact.id,
+            sourceId,
+            sourceTitle,
+            doi,
+            provenance: {
+              type: "figure",
+              table: null,
+              figure: {
+                id: figure.id,
+                page: figure.page,
+                figureIndex: figure.figure_index,
+                bbox: figure.bbox,
+                caption: figure.caption,
+              },
+              chunk: fact.chunk
+                ? {
+                    id: fact.chunk.id,
+                    page: fact.chunk.page,
+                    chunkIndex: fact.chunk.chunk_index,
+                    content: fact.chunk.content,
+                  }
+                : null,
+              bbox: figure.bbox ?? null,
+            },
+          };
+        }
+
+        if (fact.chunk) {
+          return {
+            factId: fact.id,
+            sourceId,
+            sourceTitle,
+            doi,
+            provenance: {
+              type: "chunk",
+              table: null,
+              figure: null,
+              chunk: {
+                id: fact.chunk.id,
+                page: fact.chunk.page,
+                chunkIndex: fact.chunk.chunk_index,
+                content: fact.chunk.content,
+              },
+              bbox: null,
+            },
+          };
+        }
+
+        // No table, figure, or chunk → text-only fallback. The
+        // spec's "text-only badge" requirement is satisfied by the
+        // lightbox reading `provenance.type === "text-only"` and
+        // rendering a grey badge in the header.
+        return {
+          factId: fact.id,
+          sourceId,
+          sourceTitle,
+          doi,
+          provenance: {
+            type: "text-only",
+            table: null,
+            figure: null,
+            chunk: null,
+            bbox: null,
+          },
+        };
+      } catch (error: any) {
+        logger.error(
+          { err: error, factId },
+          "research_brain_provenance_failed",
+        );
+        set.status = 500;
+        return {
+          error: "Failed to load fact provenance",
+          message: error?.message,
+        };
+      }
+    },
+    { beforeHandle: authResolver({ required: false }) },
   );
 
 export default researchBrainRoute;

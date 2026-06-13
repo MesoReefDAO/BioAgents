@@ -1,11 +1,17 @@
 import { getServiceClient } from "../../db/client";
+import { getStorageProvider } from "../../storage";
 import logger from "../../utils/logger";
+import {
+  buildTablesPromptSection,
+  type ExtractedTable,
+} from "../files/pdfTableExtractor";
 import {
   getSource,
   replaceBioprospectingFactsForSource,
   setSourceBioprospectingStatus,
 } from "./db";
 import { resolveResearchBrainLLM } from "./llm";
+import { loadTablesForSource } from "./tables";
 import type {
   ExtractedBioprospectingFact,
   ResearchEvidenceChunk,
@@ -99,6 +105,7 @@ function normalizeFacts(items: any[]): ExtractedBioprospectingFact[] {
       entities: Array.isArray(item.entities)
         ? item.entities.filter((e: unknown) => typeof e === "string")
         : [],
+      sourceTableRef: asSourceTableRef(item.sourceTableRef),
     }))
     .filter((fact) =>
       [
@@ -111,6 +118,35 @@ function normalizeFacts(items: any[]): ExtractedBioprospectingFact[] {
         fact.quote,
       ].some(Boolean),
     );
+}
+
+/**
+ * Validate a `sourceTableRef` payload from the LLM. Returns the
+ * normalized ref, or `undefined` if the payload is malformed. A
+ * ref with `rowIndex` out of range is logged and dropped (we don't
+ * want to thread invalid refs into persistence).
+ */
+function asSourceTableRef(
+  value: unknown,
+): { page: number; tableIndex: number; rowIndex?: number } | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const v = value as Record<string, unknown>;
+  const page =
+    typeof v.page === "number" && Number.isFinite(v.page)
+      ? Math.max(1, Math.trunc(v.page))
+      : undefined;
+  const tableIndex =
+    typeof v.tableIndex === "number" && Number.isFinite(v.tableIndex)
+      ? Math.max(0, Math.trunc(v.tableIndex))
+      : undefined;
+  if (page == null || tableIndex == null) return undefined;
+  const rowIndex =
+    typeof v.rowIndex === "number" && Number.isFinite(v.rowIndex)
+      ? Math.max(0, Math.trunc(v.rowIndex))
+      : undefined;
+  return rowIndex != null
+    ? { page, tableIndex, rowIndex }
+    : { page, tableIndex };
 }
 
 function readPositiveInt(name: string, fallback: number): number {
@@ -187,6 +223,7 @@ async function llmFactsForChunkBatch(
   title: string,
   doi: string | null | undefined,
   chunks: ResearchEvidenceChunk[],
+  tables: ExtractedTable[],
 ): Promise<ExtractedBioprospectingFact[]> {
   const { llm, model } = resolveResearchBrainLLM();
   if (!llm || !model) return [];
@@ -198,6 +235,8 @@ async function llmFactsForChunkBatch(
     )
     .join("\n\n---\n\n");
 
+  const tablesSection = buildTablesPromptSection(tables);
+
   const prompt = `Extract marine bioprospecting facts from the paper chunks below.
 
 Return ONLY a valid JSON array. Each object may include:
@@ -205,17 +244,24 @@ species, genus, family, higherTaxon, organismGroup, geography, ecosystem, organi
 compound, compoundClass, moleculeType, bioactivity, applicationArea, assayModel,
 resultSummary, measurementValue, measurementUnit, measurementDirection,
 measurementMin, measurementMax, timepoint, condition, pValue, sampleSize,
-statisticalTest, evidenceType, relationType, status, confidence, quote, chunkIndex, entities.
+statisticalTest, evidenceType, relationType, status, confidence, quote, chunkIndex, entities,
+sourceTableRef.
+
+sourceTableRef (optional) is an object { page: number, tableIndex: number, rowIndex?: number }
+referencing a specific cell in the "tables:" block below. Set it when the fact is
+grounded in a cell value rather than free-text. page and tableIndex match the headers
+in the "tables:" section; rowIndex is the 0-based body row (header rows do not count).
 
 Strict rules:
-- Extract only facts explicitly supported by the chunks.
+- Extract only facts explicitly supported by the chunks or the tables block.
 - Use "supported" only when the quote directly supports the fact.
 - Use "hypothesis" only for explicit speculation in the source text.
-- quote must be a short verbatim snippet from the chunk.
-- chunkIndex must match the supporting chunk_index.
+- quote must be a short verbatim snippet from the chunk (table cell text also counts).
+- chunkIndex must match the supporting chunk_index; set sourceTableRef when the
+  supporting evidence is a cell in the tables block instead.
 - Only fill measurementValue, measurementUnit, measurementDirection, measurementMin,
   measurementMax, timepoint, condition, pValue, sampleSize, or statisticalTest when
-  the quote or immediately adjacent text explicitly supports them.
+  the quote or immediately adjacent text (or a table cell) explicitly supports them.
 - measurementDirection must be one of: increase, decrease, no_change, mixed.
 - measurementUnit should preserve the paper unit, for example %, fold-change, cells/mL.
 - If the number is ambiguous, leave numeric fields out and keep it in resultSummary.
@@ -224,11 +270,14 @@ Strict rules:
   cosmetic, biomaterials, thermal resistance, coral reef/anemone/cnidarian bioprospecting.
 - Skip generic background with no organism, molecule, activity, application, or assay.
 - Prefer 0-8 high-signal facts per batch.
+- Prefer facts grounded in the tables block over facts grounded only in prose when both
+  are available — tables are higher-signal for measurements, conditions, and species-compound
+  pairings.
 
 Paper title: ${title}
 DOI: ${doi || "unknown"}
 
-Chunks:
+${tablesSection ? `${tablesSection}\n\n` : ""}Chunks:
 ${context}`;
 
   const response = await llm.createChatCompletion({
@@ -245,6 +294,7 @@ async function llmFactsForChunkBatchWithRetries(params: {
   title: string;
   doi: string | null | undefined;
   chunks: ResearchEvidenceChunk[];
+  tables: ExtractedTable[];
   batchNumber: number;
 }): Promise<ExtractedBioprospectingFact[]> {
   const timeoutMs = readPositiveInt("BIOPROSPECTING_BATCH_TIMEOUT_MS", 120000);
@@ -254,7 +304,12 @@ async function llmFactsForChunkBatchWithRetries(params: {
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
       return await withTimeout(
-        llmFactsForChunkBatch(params.title, params.doi, params.chunks),
+        llmFactsForChunkBatch(
+          params.title,
+          params.doi,
+          params.chunks,
+          params.tables,
+        ),
         timeoutMs,
         `bioprospecting batch ${params.batchNumber}`,
       );
@@ -310,6 +365,22 @@ export async function extractBioprospectingFactsForSource(
       return { sourceId, factCount: 0, status: "no_chunks" };
     }
 
+    // Step 1: ensure PDF tables are extracted and persisted. The
+    // helper is a no-op on a cache hit and runs the local→Mistral
+    // quality-gated pipeline on a miss. We invoke it inside the same
+    // "running" block so observability captures it; failures are
+    // logged but do NOT abort the LLM pass (the LLM still has the
+    // chunks to work with).
+    let tables: ExtractedTable[] = [];
+    try {
+      tables = await ensureTablesForSource(source);
+    } catch (error) {
+      logger.warn(
+        { err: error, sourceId },
+        "bioprospecting_table_extraction_failed_continuing",
+      );
+    }
+
     const facts: ExtractedBioprospectingFact[] = [];
     const maxChunks = readPositiveInt("BIOPROSPECTING_MAX_CHUNKS", 80);
     const batchSize = readPositiveInt("BIOPROSPECTING_BATCH_CHUNKS", 8);
@@ -322,6 +393,7 @@ export async function extractBioprospectingFactsForSource(
           title: source.title,
           doi: source.doi,
           chunks: batch,
+          tables,
           batchNumber: Math.floor(i / batchSize) + 1,
         })),
       );
@@ -336,7 +408,7 @@ export async function extractBioprospectingFactsForSource(
     );
 
     logger.info(
-      { sourceId, factCount: saved.length },
+      { sourceId, factCount: saved.length, tableCount: tables.length },
       "bioprospecting_extraction_completed",
     );
 
@@ -356,4 +428,71 @@ export async function extractBioprospectingFactsForSource(
     logger.error({ err: error, sourceId }, "bioprospecting_extraction_failed");
     return { sourceId, factCount: 0, status: "failed" };
   }
+}
+
+/**
+ * Ensure the source's PDF tables are extracted and persisted. Loads
+ * the PDF buffer from S3 (or no-ops if the source has no file_path),
+ * then delegates to the cache-aware orchestrator in
+ * `pdfTableExtractor.ts`. Returns the tables in the shape expected
+ * by the LLM prompt helper.
+ *
+ * Idempotency: the orchestrator's cache check returns
+ * `provider: "cache"` on a hit, so re-running this for the same
+ * source is a single DB read.
+ */
+async function ensureTablesForSource(source: {
+  id: string;
+  file_path?: string | null;
+}): Promise<ExtractedTable[]> {
+  // Try the cache first — the most common path on re-runs.
+  const cached = await loadTablesForSource(source.id);
+  if (cached.length > 0) return cached;
+
+  // No cached tables; we need the PDF to run the providers.
+  if (!source.file_path) {
+    logger.info(
+      { sourceId: source.id },
+      "bioprospecting_table_extraction_no_file_path_skipping",
+    );
+    return [];
+  }
+
+  const storage = getStorageProvider();
+  if (!storage) {
+    logger.warn(
+      { sourceId: source.id },
+      "bioprospecting_table_extraction_no_storage_provider",
+    );
+    return [];
+  }
+
+  let buffer: Buffer;
+  try {
+    buffer = await storage.download(source.file_path);
+  } catch (error) {
+    logger.warn(
+      { err: error, sourceId: source.id, filePath: source.file_path },
+      "bioprospecting_table_extraction_download_failed",
+    );
+    return [];
+  }
+
+  if (!buffer || buffer.length === 0) return [];
+
+  // Lazy import to avoid pulling pdfjs into the module-init graph of
+  // every caller of the extractor (e.g., the contradiction detector,
+  // the verifier, the memory writer — none of them need this).
+  const { extractPDFTables } = await import("../files/pdfTableExtractor");
+  const result = await extractPDFTables(source.id, new Uint8Array(buffer));
+  logger.info(
+    {
+      sourceId: source.id,
+      tableCount: result.tables.length,
+      figureCount: result.figures.length,
+      provider: result.provider,
+    },
+    "bioprospecting_table_extraction_completed",
+  );
+  return result.tables;
 }

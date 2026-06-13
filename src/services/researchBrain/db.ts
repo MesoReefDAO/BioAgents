@@ -1,3 +1,4 @@
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { getServiceClient } from "../../db/client";
 import logger from "../../utils/logger";
 import { buildIdentityKey } from "./normalize";
@@ -12,7 +13,6 @@ import type {
   ResearchTaxonRank,
   ResearchTrustTier,
 } from "./types";
-import type { SupabaseClient } from "@supabase/supabase-js";
 
 /**
  * Lazily-resolved Supabase client proxy. Every property access on
@@ -29,7 +29,10 @@ import type { SupabaseClient } from "@supabase/supabase-js";
  */
 const supabase = new Proxy({} as SupabaseClient, {
   get(_target, prop) {
-    const client = getServiceClient() as unknown as Record<string | symbol, unknown>;
+    const client = getServiceClient() as unknown as Record<
+      string | symbol,
+      unknown
+    >;
     const value = client[prop];
     return typeof value === "function" ? value.bind(client) : value;
   },
@@ -375,6 +378,67 @@ export async function createClaimEdges(claims: ResearchClaim[]): Promise<void> {
   }
 }
 
+/**
+ * Read-only helper that loads the (page, table_index) → id map for
+ * a source's persisted tables. Used by
+ * `replaceBioprospectingFactsForSource` to resolve the LLM's
+ * `sourceTableRef` payload to a real `evidence_table_id` UUID.
+ *
+ * Returns an empty map when the source has no tables or the read
+ * fails (caller is expected to handle the miss by logging and
+ * dropping the ref).
+ */
+async function loadEvidenceTableIdMap(
+  sourceId: string,
+): Promise<Map<string, string>> {
+  const map = new Map<string, string>();
+  if (!sourceId) return map;
+  const { data, error } = await supabase
+    .from("research_evidence_tables")
+    .select("id, page, table_index")
+    .eq("source_id", sourceId);
+  if (error) {
+    logger.warn(
+      { err: error, sourceId },
+      "bioprospecting_evidence_table_map_failed",
+    );
+    return map;
+  }
+  for (const row of (data || []) as Array<{
+    id: string;
+    page: number;
+    table_index: number;
+  }>) {
+    map.set(`${row.page}:${row.table_index}`, row.id);
+  }
+  return map;
+}
+
+/**
+ * Resolve an LLM-emitted `sourceTableRef` to a real
+ * `evidence_table_id` UUID. Logs a structured event on miss (so
+ * operators can spot LLM hallucinations) and returns `null` so the
+ * fact still persists with `evidence_table_id IS NULL`.
+ */
+function resolveEvidenceTableId(
+  fact: ExtractedBioprospectingFact,
+  tableByRef: Map<string, string>,
+): string | null {
+  if (!fact.sourceTableRef) return null;
+  const key = `${fact.sourceTableRef.page}:${fact.sourceTableRef.tableIndex}`;
+  const id = tableByRef.get(key);
+  if (!id) {
+    logger.warn(
+      {
+        sourceTableRef: fact.sourceTableRef,
+        sourceId: undefined,
+      },
+      "bioprospecting_table_ref_missing",
+    );
+  }
+  return id ?? null;
+}
+
 export async function replaceBioprospectingFactsForSource(
   source: ResearchSource,
   facts: ExtractedBioprospectingFact[],
@@ -391,12 +455,18 @@ export async function replaceBioprospectingFactsForSource(
     if (chunk.chunk_index != null) chunkByIndex.set(chunk.chunk_index, chunk);
   }
 
+  // Look up the source's persisted tables so we can resolve
+  // `sourceTableRef` to `evidence_table_id`. A miss is logged and
+  // dropped (the fact is still saved without a table FK).
+  const tableByRef = await loadEvidenceTableIdMap(source.id);
+
   const payload = facts
     .map((fact) => {
       const chunk =
         fact.chunkIndex != null ? chunkByIndex.get(fact.chunkIndex) : undefined;
       const hasEvidence = !!chunk?.id;
       const quote = normalizeOptionalString(fact.quote);
+      const evidenceTableId = resolveEvidenceTableId(fact, tableByRef);
 
       return {
         source_id: source.id,
@@ -440,11 +510,13 @@ export async function replaceBioprospectingFactsForSource(
         quote,
         doi: source.doi || null,
         page: chunk?.page || null,
+        evidence_table_id: evidenceTableId,
         metadata: {
           entities: fact.entities || [],
           extractor: "bioprospectingExtractor",
           sourceTitle: source.title,
           chunkIndex: fact.chunkIndex ?? null,
+          sourceTableRef: fact.sourceTableRef ?? null,
         },
       };
     })
@@ -649,7 +721,10 @@ function compareCanonicalScores(
 async function insertCanonicalWithReroute(
   fact: Record<string, unknown>,
   key: string,
-): Promise<{ canonical: BioprospectingFact; mergedSiblings: BioprospectingFact[] }> {
+): Promise<{
+  canonical: BioprospectingFact;
+  mergedSiblings: BioprospectingFact[];
+}> {
   const { data, error } = await supabase
     .from("research_bioprospecting_facts")
     .insert([fact])
@@ -772,9 +847,10 @@ export async function findMergedFactIds(
  *
  * Read-only: no insert, update, or delete.
  */
-export async function getDuplicateGroup(
-  factId: string,
-): Promise<{ canonical: BioprospectingFact; merged: BioprospectingFact[] } | null> {
+export async function getDuplicateGroup(factId: string): Promise<{
+  canonical: BioprospectingFact;
+  merged: BioprospectingFact[];
+} | null> {
   if (!factId) return null;
 
   // Touch the edge table to detect group membership cheaply.
@@ -795,19 +871,25 @@ export async function getDuplicateGroup(
   // Fetch the full group: the canonical plus every row that points to it.
   // Two queries then merge: the canonical row (matched by id + null parent)
   // and the sibling rows (matched by parent). Merged in memory.
-  const [{ data: canonicalRow, error: canonicalError }, { data: siblingRows, error: siblingsError }] =
-    await Promise.all([
-      supabase
-        .from("research_bioprospecting_facts")
-        .select("*, source:research_sources(*), chunk:research_evidence_chunks(*)")
-        .eq("id", canonicalId)
-        .is("merged_into_fact_id", null)
-        .maybeSingle(),
-      supabase
-        .from("research_bioprospecting_facts")
-        .select("*, source:research_sources(*), chunk:research_evidence_chunks(*)")
-        .eq("merged_into_fact_id", canonicalId),
-    ]);
+  const [
+    { data: canonicalRow, error: canonicalError },
+    { data: siblingRows, error: siblingsError },
+  ] = await Promise.all([
+    supabase
+      .from("research_bioprospecting_facts")
+      .select(
+        "*, source:research_sources(*), chunk:research_evidence_chunks(*)",
+      )
+      .eq("id", canonicalId)
+      .is("merged_into_fact_id", null)
+      .maybeSingle(),
+    supabase
+      .from("research_bioprospecting_facts")
+      .select(
+        "*, source:research_sources(*), chunk:research_evidence_chunks(*)",
+      )
+      .eq("merged_into_fact_id", canonicalId),
+  ]);
   if (canonicalError) throw canonicalError;
   if (siblingsError) throw siblingsError;
 
@@ -821,7 +903,9 @@ export async function getDuplicateGroup(
     | undefined;
   if (!canonical) return null;
 
-  const merged = groupData.filter((r) => r.id !== canonicalId) as BioprospectingFact[];
+  const merged = groupData.filter(
+    (r) => r.id !== canonicalId,
+  ) as BioprospectingFact[];
   return { canonical, merged };
 }
 
@@ -922,7 +1006,8 @@ export async function backfillBioprospectingFactDedup(params: {
     mergedIds: string[];
   };
   const plannedEdges: PlannedEdge[] = [];
-  const exampleSummaries: BioprospectingFactDedupBackfillResult["examples"] = [];
+  const exampleSummaries: BioprospectingFactDedupBackfillResult["examples"] =
+    [];
 
   for (const [identityKey, group] of groups) {
     if (group.length < 2) continue;
@@ -931,8 +1016,7 @@ export async function backfillBioprospectingFactDedup(params: {
     const siblings = group.filter((_, idx) => idx !== canonicalIndex);
 
     const canonicalId = canonical.id as string;
-    const canonicalReviewStatus =
-      (canonical.review_status as string) ?? null;
+    const canonicalReviewStatus = (canonical.review_status as string) ?? null;
     const mergedIds = siblings.map((s) => s.id as string);
 
     for (const mergedId of mergedIds) {
@@ -992,7 +1076,8 @@ export async function backfillBioprospectingFactDedup(params: {
 
   return {
     scannedFacts,
-    groupsFound: Array.from(groups.values()).filter((g) => g.length >= 2).length,
+    groupsFound: Array.from(groups.values()).filter((g) => g.length >= 2)
+      .length,
     edgesProposed,
     edgesInserted: dryRun ? 0 : edgesInserted,
     edgesSkipped: dryRun ? edgesProposed : edgesSkipped,
@@ -1995,4 +2080,32 @@ export async function getBioprospectingFactsForSource(
 
   if (error) throw error;
   return (data || []) as BioprospectingFact[];
+}
+
+/**
+ * Fetch a single bioprospecting fact by id, with source, chunk,
+ * evidence_table, and evidence_figure relations embedded.
+ *
+ * The provenance-viewer endpoint (PR #2 of
+ * `bioprospecting-pdf-provenance-viewer`) uses this loader to
+ * resolve `GET /api/research-brain/facts/:factId/provenance` in a
+ * single round-trip. The relation aliases match the FK column
+ * names — Supabase's embedded-resource syntax is
+ * `alias:table!fk_column(*)` and the column names we have on
+ * `research_bioprospecting_facts` are exactly `evidence_table_id`
+ * and `evidence_figure_id`.
+ */
+export async function getBioprospectingFact(
+  factId: string,
+): Promise<BioprospectingFact | null> {
+  if (!factId) return null;
+  const { data, error } = await supabase
+    .from("research_bioprospecting_facts")
+    .select(
+      "*, source:research_sources(*), chunk:research_evidence_chunks(*), evidence_table:research_evidence_tables!evidence_table_id(*), evidence_figure:research_evidence_figures!evidence_figure_id(*)",
+    )
+    .eq("id", factId)
+    .maybeSingle();
+  if (error) throw error;
+  return (data || null) as BioprospectingFact | null;
 }

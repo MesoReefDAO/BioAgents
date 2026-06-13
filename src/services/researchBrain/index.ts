@@ -8,6 +8,7 @@ export * from "./measurements";
 export * from "./memoryWriter";
 export * from "./normalize";
 export * from "./search";
+export * from "./tables";
 export * from "./taxonomy";
 export * from "./types";
 export * from "./verifier";

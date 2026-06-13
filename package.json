@@ -6,6 +6,7 @@
   "scripts": {
     "build": "bun run build:client",
     "build:client": "bun run client/build.ts",
+    "check:pr-budget": "bash scripts/check-pr-budget.sh",
     "dev": "bun --watch src/index.ts",
     "extract:bioprospecting": "bun run scripts/extract-bioprospecting.ts",
     "ingest:docs": "bun run scripts/ingest-docs.ts",

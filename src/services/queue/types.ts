@@ -216,6 +216,32 @@ export interface BioprospectingJobData {
 }
 
 /**
+ * Job data for compound-authority queue
+ * A scheduled tick that drives the PubChem backfill pass. The job
+ * carries no per-tick data — the worker reads the eligible fact set
+ * from the DB on each invocation. Kept as an explicit interface
+ * (rather than `{}`) so future enhancements (e.g. forcing a specific
+ * subset) can be added without breaking BullMQ's repeat registration.
+ */
+export type CompoundAuthorityJobData = Record<string, never>;
+
+/**
+ * Result returned by the compound-authority worker on completion.
+ * Mirrors the design's "run summary" log line; the worker emits this
+ * as a structured logger event so operators can grep
+ * `compound_authority_run_summary` during rollout.
+ */
+export type CompoundAuthorityJobResult = {
+  scannedFacts: number;
+  aliasHits: number;
+  pubchemHits: number;
+  pubchemMisses: number;
+  retriesScheduled: number;
+  failed: number;
+  elapsed: number;
+};
+
+/**
  * Job data for contradiction detection (manual re-run via queue).
  * Same queue as bioprospecting; worker routes by shape detection.
  * If maxChunks/batchSize are absent, it's a contradiction detection job.

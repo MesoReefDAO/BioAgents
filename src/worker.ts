@@ -17,6 +17,7 @@ import { createFileProcessWorker } from "./services/queue/workers/file-process.w
 import { startPaperGenerationWorker } from "./services/queue/workers/paper-generation.worker";
 import { createDocumentIngestionWorker } from "./services/queue/workers/document-ingestion.worker";
 import { createBioprospectingWorker } from "./services/queue/workers/bioprospecting.worker";
+import { createCompoundAuthorityWorker } from "./services/queue/workers/compoundAuthority.worker";
 import { closeConnections } from "./services/queue/connection";
 import logger from "./utils/logger";
 
@@ -30,6 +31,12 @@ async function main() {
   const paperGenerationWorker = startPaperGenerationWorker();
   const documentIngestionWorker = createDocumentIngestionWorker();
   const bioprospectingWorker = createBioprospectingWorker();
+  // Compound-authority worker is gated by COMPOUND_AUTHORITY_ENABLED
+  // (default true) at the queue layer; the worker itself always starts
+  // so manual enqueueing via Bull Board is possible even when the
+  // scheduled repeat is disabled. Note: the worker IDLES when no jobs
+  // are present, so there is no per-tick cost in the disabled case.
+  const compoundAuthorityWorker = createCompoundAuthorityWorker();
 
   logger.info(
     {
@@ -39,6 +46,7 @@ async function main() {
       paperGenerationConcurrency: process.env.PAPER_GENERATION_CONCURRENCY || 1,
       documentIngestionConcurrency: process.env.DOCUMENT_INGESTION_CONCURRENCY || 2,
       bioprospectingConcurrency: process.env.BIOPROSPECTING_CONCURRENCY || 1,
+      compoundAuthorityConcurrency: 1,
       redisUrl: process.env.REDIS_URL ? "[REDACTED]" : "redis://localhost:6379",
     },
     "workers_started",
@@ -57,6 +65,7 @@ async function main() {
       paperGenerationWorker.close().then(() => logger.info("paper_generation_worker_closed")),
       documentIngestionWorker.close().then(() => logger.info("document_ingestion_worker_closed")),
       bioprospectingWorker.close().then(() => logger.info("bioprospecting_worker_closed")),
+      compoundAuthorityWorker.close().then(() => logger.info("compound_authority_worker_closed")),
     ];
 
     logger.info("waiting_for_all_workers_to_finish_current_jobs");

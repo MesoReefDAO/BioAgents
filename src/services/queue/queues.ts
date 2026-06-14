@@ -19,6 +19,8 @@ import type {
   DocumentIngestionJobData,
   DocumentIngestionJobResult,
   BioprospectingJobData,
+  CompoundAuthorityJobData,
+  CompoundAuthorityJobResult,
 } from "./types";
 import logger from "../../utils/logger";
 
@@ -29,6 +31,13 @@ let fileProcessQueueInstance: Queue<FileProcessJobData, FileProcessJobResult> | 
 let paperGenerationQueueInstance: Queue<PaperGenerationJobData, PaperGenerationJobResult> | null = null;
 let documentIngestionQueueInstance: Queue<DocumentIngestionJobData, DocumentIngestionJobResult> | null = null;
 let bioprospectingQueueInstance: Queue<BioprospectingJobData, any> | null = null;
+let compoundAuthorityQueueInstance: Queue<CompoundAuthorityJobData, CompoundAuthorityJobResult> | null = null;
+
+/** Sentinel: when true, we already attempted to register the
+ * repeatable job for the compound-authority queue in this process.
+ * Prevents double-registration when the queue getter is called from
+ * multiple sites (e.g. worker.ts and a future /api trigger). */
+let compoundAuthorityRepeatRegistered = false;
 
 /**
  * Get or create the chat queue
@@ -266,6 +275,102 @@ export function getBioprospectingQueue(): Queue<BioprospectingJobData, any> {
 }
 
 /**
+ * Get or create the compound-authority queue.
+ *
+ * The queue drives a scheduled PubChem backfill pass on the
+ * `research_bioprospecting_facts` table. The repeat interval is
+ * driven by `COMPOUND_AUTHORITY_INTERVAL_HOURS` (default 6).
+ *
+ * Disable switches:
+ *   - `COMPOUND_AUTHORITY_ENABLED=false` — skip repeat registration
+ *     entirely (the queue is still created and queryable, so an admin
+ *     can still enqueue a one-shot via Bull Board)
+ *   - `COMPOUND_AUTHORITY_INTERVAL_HOURS=0` — same as disabled
+ *
+ * The queue uses `attempts: 1` because each per-fact retry is
+ * handled inside the worker (the `compound_authority_at` re-check
+ * window), not by BullMQ's delayed-jobs machinery.
+ */
+export function getCompoundAuthorityQueue(): Queue<
+  CompoundAuthorityJobData,
+  CompoundAuthorityJobResult
+> {
+  if (!isJobQueueEnabled()) {
+    throw new Error("Job queue is not enabled. Set USE_JOB_QUEUE=true to use queues.");
+  }
+
+  if (!compoundAuthorityQueueInstance) {
+    compoundAuthorityQueueInstance = new Queue<
+      CompoundAuthorityJobData,
+      CompoundAuthorityJobResult
+    >("compound-authority", {
+      connection: getBullMQConnection(),
+      defaultJobOptions: {
+        // The worker already handles per-fact retry via the
+        // `compound_authority_at` re-check window. We do NOT want
+        // BullMQ to retry the whole job on a single bad fact.
+        attempts: 1,
+        removeOnComplete: {
+          age: 3600,
+          count: 100,
+        },
+        removeOnFail: {
+          age: 86400,
+        },
+      },
+    });
+
+    logger.info({ queue: "compound-authority" }, "compound_authority_queue_initialized");
+  }
+
+  // Idempotent repeat registration: only the first call per process
+  // schedules the repeat. Subsequent calls re-use the existing
+  // repeatable. Safe across worker.ts / API server restarts because
+  // BullMQ persists repeat metadata in Redis.
+  if (!compoundAuthorityRepeatRegistered) {
+    compoundAuthorityRepeatRegistered = true;
+    const enabled = process.env.COMPOUND_AUTHORITY_ENABLED !== "false";
+    const intervalHoursRaw = process.env.COMPOUND_AUTHORITY_INTERVAL_HOURS;
+    const intervalHours = intervalHoursRaw ? Number(intervalHoursRaw) : 6;
+    if (!enabled) {
+      logger.info(
+        { queue: "compound-authority" },
+        "compound_authority_repeat_disabled_by_env",
+      );
+    } else if (!Number.isFinite(intervalHours) || intervalHours <= 0) {
+      logger.info(
+        { queue: "compound-authority", intervalHoursRaw },
+        "compound_authority_repeat_disabled_zero_interval",
+      );
+    } else {
+      const everyMs = Math.floor(intervalHours * 60 * 60 * 1000);
+      // Fire-and-forget: the registration is durable (BullMQ persists
+      // it) so we do not block the caller. We log on rejection.
+      void compoundAuthorityQueueInstance
+        .add(
+          "compound-authority-tick",
+          {},
+          { repeat: { every: everyMs } },
+        )
+        .then(() => {
+          logger.info(
+            { queue: "compound-authority", everyMs, intervalHours },
+            "compound_authority_repeat_registered",
+          );
+        })
+        .catch((err: unknown) => {
+          logger.error(
+            { err, queue: "compound-authority", everyMs },
+            "compound_authority_repeat_registration_failed",
+          );
+        });
+    }
+  }
+
+  return compoundAuthorityQueueInstance;
+}
+
+/**
  * Close all queue instances (for graceful shutdown)
  */
 export async function closeQueues(): Promise<void> {
@@ -276,6 +381,7 @@ export async function closeQueues(): Promise<void> {
     paperGenerationQueueInstance,
     documentIngestionQueueInstance,
     bioprospectingQueueInstance,
+    compoundAuthorityQueueInstance,
   ];
 
   await Promise.all(
@@ -290,6 +396,11 @@ export async function closeQueues(): Promise<void> {
   paperGenerationQueueInstance = null;
   documentIngestionQueueInstance = null;
   bioprospectingQueueInstance = null;
+  compoundAuthorityQueueInstance = null;
+  // Note: we do NOT reset `compoundAuthorityRepeatRegistered` here —
+  // in a graceful shutdown the process is exiting; if the queue
+  // is recreated in the same process, repeat is still durable in
+  // Redis and we want a stable "registered once" contract.
 
   logger.info("queues_closed");
 }

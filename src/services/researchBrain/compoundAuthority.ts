@@ -831,3 +831,772 @@ export async function promoteFactToPending(
 
 /** Default authority stamp for fresh inserts. Exported for tests. */
 export const emptyStamp: CompoundAuthorityStamp = { ...EMPTY_STAMP };
+
+// ---------------------------------------------------------------------------
+// PR #2 — PubChem backfill path
+// Rate gate, PubChem HTTP client, upsert helpers, retry policy, and the
+// `normalizeBioprospectingCompounds` driver. Lives in the same module
+// so PR #1's sync path and PR #2's async path share `attachCanonicalToFact`.
+// ---------------------------------------------------------------------------
+
+/**
+ * PubChem PUG-REST base URL. The three endpoints the worker uses are:
+ *   GET /compound/name/{name}/cids/JSON              — name -> CID
+ *   GET /compound/cid/{cid}/property/InChIKey,...   — CID -> props
+ *   GET /compound/cid/{cid}/synonyms/JSON            — CID -> synonyms
+ *
+ * Spike findings (see `scripts/spike-pubchem.ts`, removed before merge):
+ *   - 200 OK on hit
+ *       name->cid:      { IdentifierList: { CID: [number] } }   (array, even for single)
+ *       cid->props:     { PropertyTable: { Properties: [{ CID, MolecularFormula, InChIKey, IUPACName }] } }
+ *       cid->synonyms:  { InformationList: { Information: [{ CID, Synonym: [string, ...] }] } }
+ *   - 404 with body: { Fault: { Code: "PUGREST.NotFound", Message: "No CID found" } }
+ *   - 503 (not 429) is the rate-limit signal. Body:
+ *       { Fault: { Code: "PUGREST.ServerBusy", Message: "Too many requests or server too busy" } }
+ *     The 503 response carries `Retry-After: <seconds>` which we honor.
+ *   - `X-Throttling-Control` header is informational only (server
+ *     load percentages); we do not act on it.
+ *   - PubChem may return InChIKey/MolecularFormula as `undefined` for
+ *     compounds that have not been fully indexed; defensive parsing
+ *     coerces to null.
+ */
+const PUBCHEM_BASE = "https://pubchem.ncbi.nlm.nih.gov/rest/pug";
+const PUBCHEM_TIMEOUT_MS = 12_000;
+
+/** Default requests per second. Overridable via env (PR #3 will wire
+ * `COMPOUND_AUTHORITY_RATE_LIMIT_RPS`; this constant is the in-code
+ * default the worker reads). */
+export const COMPOUND_AUTHORITY_DEFAULT_RPS = 4;
+
+/** Default max retry attempts before a fact is moved to `failed`. */
+export const COMPOUND_AUTHORITY_DEFAULT_MAX_RETRIES = 5;
+
+/**
+ * Backoff schedule (ms) for the `compound_authority_at` re-check
+ * window. The column itself IS the backoff — the next scheduled run
+ * will only re-pick the fact when `compound_authority_at < NOW() -
+ * 24h` (matching the 24h cycle). The exact value in `at` does not
+ * need to encode the backoff; the `attempts` counter does. This
+ * array exists so the design has an auditable reference and tests
+ * can assert the schedule. Indices:
+ *   attempts=1 -> 60_000      (1 minute — first retry)
+ *   attempts=2 -> 300_000     (5 minutes)
+ *   attempts=3 -> 1_500_000   (25 minutes)
+ *   attempts=4 -> 7_200_000   (2 hours)
+ *   attempts=5 -> 28_800_000  (8 hours — final retry before failed)
+ *
+ * The design obviates BullMQ delayed jobs by using a re-check window
+ * on the fact row. Operators who want a per-fact backoff can read
+ * the worker's run summary (attempts) and re-enqueue via the
+ * `normalize-compounds` CLI.
+ */
+export const BACKOFFS_MS: readonly number[] = Object.freeze([
+  60_000,
+  300_000,
+  1_500_000,
+  7_200_000,
+  28_800_000,
+]);
+
+/** Pick the backoff for the next attempt. `attempts` is the count
+ * AFTER the increment (i.e. 1 on first retry). */
+export function backoffFor(attempts: number): number {
+  if (!Number.isFinite(attempts) || attempts < 1) return BACKOFFS_MS[0];
+  const idx = Math.min(attempts - 1, BACKOFFS_MS.length - 1);
+  return BACKOFFS_MS[idx];
+}
+
+// ---------------------------------------------------------------------------
+// RateGate — closure over last=0 + pausedUntil=0
+// ---------------------------------------------------------------------------
+
+/**
+ * Minimal in-process rate limiter. Blocks `take()` until either
+ * `last + minIntervalMs` or `pausedUntil` (whichever is later) has
+ * elapsed, then sets `last = now`. `pause(ms)` raises `pausedUntil`
+ * to `max(pausedUntil, now + ms)` — used to honor `Retry-After`
+ * responses from PubChem.
+ *
+ * Implementation note: not a token bucket. The chosen design
+ * (await sleep + clamp) is the simplest gate that satisfies the
+ * contract. At 4 rps the worker's load is steady; bursts are
+ * smoothed by the 250ms cadence.
+ *
+ * The class is intentionally test-friendly: `now()` and `sleep()`
+ * can be overridden via constructor for deterministic tests.
+ */
+export class RateGate {
+  private last = 0;
+  private pausedUntil = 0;
+  private readonly minIntervalMs: number;
+  private readonly nowFn: () => number;
+  private readonly sleepFn: (ms: number) => Promise<void>;
+
+  constructor(opts?: { rps?: number; now?: () => number; sleep?: (ms: number) => Promise<void> }) {
+    const rps = opts?.rps ?? COMPOUND_AUTHORITY_DEFAULT_RPS;
+    this.minIntervalMs = Math.max(1, Math.floor(1000 / rps));
+    this.nowFn = opts?.now ?? (() => Date.now());
+    this.sleepFn =
+      opts?.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
+  }
+
+  /** Block until the gate allows the next call, then claim the slot. */
+  async take(): Promise<void> {
+    const now = this.nowFn();
+    const target = Math.max(this.pausedUntil, this.last + this.minIntervalMs);
+    const wait = target - now;
+    if (wait > 0) await this.sleepFn(wait);
+    this.last = this.nowFn();
+  }
+
+  /** Raise the gate's pause deadline. Multiple `pause()` calls take
+   * the max — a 30s pause is not shortened by a later 5s pause. */
+  pause(ms: number): void {
+    if (!Number.isFinite(ms) || ms <= 0) return;
+    const now = this.nowFn();
+    const proposed = now + ms;
+    if (proposed > this.pausedUntil) this.pausedUntil = proposed;
+  }
+
+  /** Read-only debug accessor (used by tests). */
+  getMinIntervalMs(): number {
+    return this.minIntervalMs;
+  }
+
+  getPausedUntil(): number {
+    return this.pausedUntil;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// PubChem HTTP client (worker only)
+// ---------------------------------------------------------------------------
+
+export class PubChemRateLimited extends Error {
+  readonly retryAfterMs: number;
+  readonly status: number;
+  constructor(message: string, status: number, retryAfterMs: number) {
+    super(message);
+    this.name = "PubChemRateLimited";
+    this.status = status;
+    this.retryAfterMs = retryAfterMs;
+  }
+}
+
+export class PubChemNotFound extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PubChemNotFound";
+  }
+}
+
+/**
+ * Parse a `Retry-After` header value (seconds or HTTP-date) into
+ * milliseconds. Returns the fallback when the header is missing or
+ * unparseable. PubChem's actual behavior is always integer seconds
+ * (we observed `Retry-After: 30`); HTTP-date is supported per RFC
+ * 9110 but not exercised.
+ */
+export function parseRetryAfter(value: string | null, fallbackMs: number = 30_000): number {
+  if (!value) return fallbackMs;
+  const trimmed = value.trim();
+  if (!trimmed) return fallbackMs;
+  // Pure integer seconds
+  if (/^\d+(\.\d+)?$/.test(trimmed)) {
+    return Math.max(0, Math.floor(Number(trimmed) * 1000));
+  }
+  // HTTP-date
+  const dateMs = Date.parse(trimmed);
+  if (Number.isFinite(dateMs)) {
+    return Math.max(0, dateMs - Date.now());
+  }
+  return fallbackMs;
+}
+
+/**
+ * Internal fetch wrapper that:
+ *   - respects the rate gate (`gate.take()` first)
+ *   - applies a 12s timeout via `AbortController`
+ *   - throws `PubChemRateLimited` on 429/503 with the parsed Retry-After
+ *     (and pauses the gate so the next caller waits too)
+ *   - throws `PubChemNotFound` on 404
+ *   - returns parsed JSON on 2xx
+ *   - logs and rethrows other non-2xx (caller decides whether to retry)
+ *
+ * The function is `async` and `await`s the rate gate. It is the only
+ * place in the worker that issues HTTP traffic to PubChem.
+ */
+async function pubchemFetch(
+  url: string,
+  gate: RateGate,
+  opts?: { fetchImpl?: typeof fetch },
+): Promise<unknown> {
+  await gate.take();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), PUBCHEM_TIMEOUT_MS);
+  const fetchImpl = opts?.fetchImpl ?? globalThis.fetch;
+  let response: Response;
+  try {
+    response = await fetchImpl(url, {
+      method: "GET",
+      headers: { Accept: "application/json" },
+      signal: controller.signal,
+    });
+  } catch (err) {
+    clearTimeout(timer);
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(`pubchem_fetch_failed: ${msg}`);
+  } finally {
+    clearTimeout(timer);
+  }
+
+  if (response.status === 404) {
+    throw new PubChemNotFound(`pubchem 404: ${url}`);
+  }
+  if (response.status === 429 || response.status === 503) {
+    const retryAfterMs = parseRetryAfter(response.headers.get("Retry-After"));
+    gate.pause(retryAfterMs);
+    throw new PubChemRateLimited(
+      `pubchem ${response.status}: ${url}`,
+      response.status,
+      retryAfterMs,
+    );
+  }
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+    throw new Error(`pubchem ${response.status}: ${text.slice(0, 200)}`);
+  }
+  return response.json();
+}
+
+// ---------------------------------------------------------------------------
+// fetchPubChemCid / fetchPubChemProperties / fetchPubChemSynonyms
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve a compound name to a PubChem CID via the
+ * `/compound/name/{name}/cids/JSON` endpoint. Returns the integer CID
+ * or `null` on 404.
+ */
+export async function fetchPubChemCid(
+  name: string,
+  gate: RateGate,
+  opts?: { fetchImpl?: typeof fetch },
+): Promise<number | null> {
+  const trimmed = (name || "").trim();
+  if (!trimmed) return null;
+  const url = `${PUBCHEM_BASE}/compound/name/${encodeURIComponent(trimmed)}/cids/JSON`;
+  try {
+    const body = (await pubchemFetch(url, gate, opts)) as {
+      IdentifierList?: { CID?: number[] };
+    };
+    const cid = body?.IdentifierList?.CID?.[0];
+    return typeof cid === "number" ? cid : null;
+  } catch (err) {
+    if (err instanceof PubChemNotFound) return null;
+    throw err;
+  }
+}
+
+export type PubChemProperties = {
+  cid: number;
+  inchiKey: string | null;
+  formula: string | null;
+  iupac: string | null;
+};
+
+/**
+ * Fetch InChIKey / MolecularFormula / IUPACName for a CID. Returns
+ * `null` on 404. Defensive against PubChem returning
+ * `InChIKey: undefined` (seen in spike for some compounds).
+ */
+export async function fetchPubChemProperties(
+  cid: number,
+  gate: RateGate,
+  opts?: { fetchImpl?: typeof fetch },
+): Promise<PubChemProperties | null> {
+  if (!Number.isFinite(cid) || cid <= 0) return null;
+  const url = `${PUBCHEM_BASE}/compound/cid/${encodeURIComponent(String(cid))}/property/InChIKey,MolecularFormula,IUPACName/JSON`;
+  try {
+    const body = (await pubchemFetch(url, gate, opts)) as {
+      PropertyTable?: { Properties?: Array<{
+        CID?: number;
+        InChIKey?: string | null;
+        MolecularFormula?: string | null;
+        IUPACName?: string | null;
+      }> };
+    };
+    const row = body?.PropertyTable?.Properties?.[0];
+    if (!row) return null;
+    return {
+      cid: row.CID ?? cid,
+      inchiKey: row.InChIKey ?? null,
+      formula: row.MolecularFormula ?? null,
+      iupac: row.IUPACName ?? null,
+    };
+  } catch (err) {
+    if (err instanceof PubChemNotFound) return null;
+    throw err;
+  }
+}
+
+/**
+ * Fetch synonyms for a CID. Returns `[]` on 404 or on parse failure.
+ * Note: the worker does NOT currently write PubChem synonyms to the
+ * alias table — the seed loader supplies the curated starter set,
+ * and the worker is concerned with the canonical row's identity. This
+ * helper is exported for future use (PR #3 admin UI) and for tests.
+ */
+export async function fetchPubChemSynonyms(
+  cid: number,
+  gate: RateGate,
+  opts?: { fetchImpl?: typeof fetch; limit?: number },
+): Promise<string[]> {
+  if (!Number.isFinite(cid) || cid <= 0) return [];
+  const url = `${PUBCHEM_BASE}/compound/cid/${encodeURIComponent(String(cid))}/synonyms/JSON`;
+  try {
+    const body = (await pubchemFetch(url, gate, opts)) as {
+      InformationList?: { Information?: Array<{ Synonym?: string[] }> };
+    };
+    const syns = body?.InformationList?.Information?.[0]?.Synonym;
+    if (!Array.isArray(syns)) return [];
+    const limit = opts?.limit ?? 50;
+    return syns.filter((s) => typeof s === "string").slice(0, limit);
+  } catch (err) {
+    if (err instanceof PubChemNotFound) return [];
+    throw err;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// upsertCanonicalByPubChem / upsertAlias
+// ---------------------------------------------------------------------------
+
+export type UpsertCanonicalInput = {
+  cid: number;
+  canonicalName: string;
+  inchiKey: string | null;
+  formula: string | null;
+  iupac: string | null;
+  compoundKind?: "small_molecule" | "peptide" | "protein" | "lipid" | "other";
+};
+
+export type UpsertCanonicalResult = {
+  id: string;
+  inserted: boolean;
+};
+
+/**
+ * Upsert a canonical `research_compounds` row by `pubchem_cid` (the
+ * most authoritative signal) and fall back to `normalized_name` (to
+ * merge with a curator-seeded row whose CID is not yet known). On
+ * insert, `status = 'pubchem'`. Returns the row id and whether the
+ * row was newly created.
+ */
+export async function upsertCanonicalByPubChem(
+  input: UpsertCanonicalInput,
+): Promise<UpsertCanonicalResult> {
+  const normalized = normalizeForCompoundLookup(input.canonicalName);
+  if (!normalized) {
+    throw new Error("canonicalName is required");
+  }
+  // 1) Try a match on pubchem_cid first.
+  const { data: byCid, error: byCidError } = await supabase
+    .from("research_compounds")
+    .select("id")
+    .eq("pubchem_cid", input.cid)
+    .maybeSingle();
+  if (byCidError) throw byCidError;
+  if (byCid) {
+    return { id: (byCid as { id: string }).id, inserted: false };
+  }
+
+  // 2) Try a match on normalized_name (may have been seeded as 'curated').
+  const { data: byName, error: byNameError } = await supabase
+    .from("research_compounds")
+    .select("id, pubchem_cid")
+    .eq("normalized_name", normalized)
+    .maybeSingle();
+  if (byNameError) throw byNameError;
+  if (byName) {
+    const existing = byName as { id: string; pubchem_cid: number | null };
+    // Backfill CID/props if missing. We do NOT overwrite curator values
+    // (curated rows keep their curated status).
+    if (existing.pubchem_cid == null) {
+      const { error: updateError } = await supabase
+        .from("research_compounds")
+        .update({
+          pubchem_cid: input.cid,
+          inchi_key: input.inchiKey,
+          molecular_formula: input.formula,
+          iupac_name: input.iupac,
+        })
+        .eq("id", existing.id);
+      if (updateError) throw updateError;
+    }
+    return { id: existing.id, inserted: false };
+  }
+
+  // 3) Insert fresh.
+  const { data: inserted, error: insertError } = await supabase
+    .from("research_compounds")
+    .insert({
+      canonical_name: input.canonicalName,
+      normalized_name: normalized,
+      inchi_key: input.inchiKey,
+      pubchem_cid: input.cid,
+      molecular_formula: input.formula,
+      iupac_name: input.iupac,
+      compound_kind: input.compoundKind ?? "small_molecule",
+      status: "pubchem",
+    })
+    .select("id")
+    .single();
+  if (insertError) throw insertError;
+  return { id: (inserted as { id: string }).id, inserted: true };
+}
+
+/**
+ * Idempotent alias insert. On duplicate `(compound_id,
+ * normalized_alias)` the call is a no-op (no new row, no error).
+ * Returns `{ id, inserted }`.
+ */
+export async function upsertAlias(input: {
+  compoundId: string;
+  alias: string;
+  source: "local_extraction" | "pubchem" | "chebi" | "manual" | "curated";
+  confidence?: "high" | "medium" | "low";
+}): Promise<{ id: string; inserted: boolean }> {
+  const trimmed = (input.alias || "").trim();
+  if (!trimmed) throw new Error("alias is required");
+  const normalized = normalizeForCompoundLookup(trimmed);
+  if (!normalized) throw new Error("alias is required");
+  const { data: existing, error: existingError } = await supabase
+    .from("research_compound_aliases")
+    .select("id")
+    .eq("compound_id", input.compoundId)
+    .eq("normalized_alias", normalized)
+    .maybeSingle();
+  if (existingError) throw existingError;
+  if (existing) return { id: (existing as { id: string }).id, inserted: false };
+  const { data: inserted, error: insertError } = await supabase
+    .from("research_compound_aliases")
+    .insert({
+      compound_id: input.compoundId,
+      alias: trimmed,
+      normalized_alias: normalized,
+      source: input.source,
+      confidence: input.confidence ?? "medium",
+    })
+    .select("id")
+    .single();
+  if (insertError) throw insertError;
+  return { id: (inserted as { id: string }).id, inserted: true };
+}
+
+// ---------------------------------------------------------------------------
+// NormalizeBackfillParams / BackfillSummary
+// ---------------------------------------------------------------------------
+
+export type NormalizeBackfillParams = {
+  limit?: number;
+  dryRun?: boolean;
+  onlyMissing?: boolean;
+  /** Override the rate (req/s) — useful for tests. */
+  rps?: number;
+  /** Inject a custom fetch implementation (tests). */
+  fetchImpl?: typeof fetch;
+  /** Inject a clock (tests). */
+  now?: () => number;
+};
+
+export type BackfillSummary = {
+  scannedFacts: number;
+  aliasHits: number;
+  pubchemHits: number;
+  pubchemMisses: number;
+  retriesScheduled: number;
+  failed: number;
+  elapsed: number;
+};
+
+const MAX_BACKFILL_LIMIT = 500;
+
+/**
+ * The 24h re-check window. A fact whose `compound_authority_at` is
+ * older than this and is still `pending` is eligible for another
+ * attempt. Matches the `BACKOFFS_MS[4] = 8h` ceiling — the
+ * exponential backoff caps at 8h but the window is 24h so a fact
+ * gets one extra chance beyond the strict backoff before being
+ * re-picked.
+ */
+const RECHECK_WINDOW_HOURS = 24;
+
+// ---------------------------------------------------------------------------
+// normalizeBioprospectingCompounds — async backfill driver
+// ---------------------------------------------------------------------------
+
+/**
+ * Drive one pass of the PubChem backfill. Reads up to `limit`
+ * pending facts (oldest first), resolves each one through the
+ * alias map (fast path) or PubChem (slow path), and writes the
+ * authority state. Returns a summary the worker logs.
+ *
+ * Per-fact try/catch: one bad fact does NOT abort the pass. The
+ * fact is logged with structured context and the worker proceeds.
+ *
+ * Concurrency: serial. The gate guarantees at most one PubChem
+ * call at a time, capped at `rps` (default 4). For a typical 50-fact
+ * batch with 30 alias hits and 20 PubChem hits, the pass completes
+ * in ~20 × 2 / 4 = 10 seconds (excluding the 24h re-check window).
+ */
+export async function normalizeBioprospectingCompounds(
+  params: NormalizeBackfillParams = {},
+): Promise<BackfillSummary> {
+  const limit = Math.max(1, Math.min(MAX_BACKFILL_LIMIT, params.limit ?? 50));
+  const onlyMissing = params.onlyMissing ?? true;
+  const rps = params.rps ?? COMPOUND_AUTHORITY_DEFAULT_RPS;
+  const gate = new RateGate({ rps, ...(params.now ? { now: params.now } : {}) });
+  const startedAt = Date.now();
+  const summary: BackfillSummary = {
+    scannedFacts: 0,
+    aliasHits: 0,
+    pubchemHits: 0,
+    pubchemMisses: 0,
+    retriesScheduled: 0,
+    failed: 0,
+    elapsed: 0,
+  };
+
+  // 1) Build the alias map (same in-memory shape as the sync path).
+  const aliasMap = await loadAliasMap();
+
+  // 2) Load the eligible fact set.
+  const facts = await selectPendingFacts({ limit, onlyMissing });
+  summary.scannedFacts = facts.length;
+  if (facts.length === 0) {
+    summary.elapsed = Date.now() - startedAt;
+    return summary;
+  }
+
+  // 3) Per-fact processing with isolated error handling.
+  for (const fact of facts) {
+    if (params.dryRun) {
+      // Dry-run: count what we WOULD do without writing.
+      const resolved = resolveInitialStatus(fact.compound, aliasMap);
+      if (resolved.status === "verified") summary.aliasHits++;
+      else summary.pubchemMisses++;
+      continue;
+    }
+    try {
+      await processOneFact(fact, { aliasMap, gate, fetchImpl: params.fetchImpl }, summary);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      logger.error(
+        { err, factId: fact.id, compound: fact.compound, message },
+        "compound_authority_backfill_fact_failed",
+      );
+      // Do not increment summary counters — the per-fact helper
+      // accounts for alias hits, PubChem hits, and misses inside
+      // the try block. A throw here is a hard failure (e.g. DB
+      // write error) that does not map to a clean state.
+    }
+  }
+
+  summary.elapsed = Date.now() - startedAt;
+  return summary;
+}
+
+type PendingFactRow = {
+  id: string;
+  compound: string;
+  compound_authority_attempts: number;
+};
+
+async function selectPendingFacts(opts: {
+  limit: number;
+  onlyMissing: boolean;
+}): Promise<PendingFactRow[]> {
+  const recheckIso = new Date(
+    Date.now() - RECHECK_WINDOW_HOURS * 60 * 60 * 1000,
+  ).toISOString();
+  let query = supabase
+    .from("research_bioprospecting_facts")
+    .select(
+      "id, compound, compound_authority_attempts",
+    )
+    .eq("compound_authority_status", "pending")
+    .not("compound", "is", null)
+    .order("created_at", { ascending: true })
+    .limit(opts.limit);
+  if (opts.onlyMissing) {
+    // Compound predicate: attempts<MAX OR at IS NULL OR at<NOW()-24h
+    // PostgREST can't express a multi-clause OR cleanly; we use OR.
+    const max = COMPOUND_AUTHORITY_DEFAULT_MAX_RETRIES;
+    query = query.or(
+      `compound_authority_attempts.lt.${max},compound_authority_at.is.null,compound_authority_at.lt.${recheckIso}`,
+    );
+  }
+  const { data, error } = await query;
+  if (error) {
+    logger.error({ err: error }, "compound_authority_backfill_select_failed");
+    return [];
+  }
+  return ((data || []) as Array<{
+    id: string;
+    compound: string | null;
+    compound_authority_attempts: number | null;
+  }>).filter(
+    (r): r is PendingFactRow => typeof r.id === "string" && typeof r.compound === "string",
+  ).map((r) => ({
+    id: r.id,
+    compound: r.compound,
+    compound_authority_attempts: r.compound_authority_attempts ?? 0,
+  }));
+}
+
+type ProcessCtx = {
+  aliasMap: Map<string, string>;
+  gate: RateGate;
+  fetchImpl?: typeof fetch;
+};
+
+async function processOneFact(
+  fact: PendingFactRow,
+  ctx: ProcessCtx,
+  summary: BackfillSummary,
+): Promise<void> {
+  // 1) Re-check the alias map (in case an admin added one since the fact was extracted).
+  const initial = resolveInitialStatus(fact.compound, ctx.aliasMap);
+  if (initial.status === "verified" && initial.canonicalId) {
+    await attachCanonicalToFact({
+      factId: fact.id,
+      canonicalId: initial.canonicalId,
+      status: "verified",
+      reason: COMPOUND_AUTHORITY_REASONS.pubchemResolved,
+    });
+    summary.aliasHits++;
+    return;
+  }
+  if (initial.status === "skipped") {
+    // Extract detected — re-stamp with skipped (idempotent on identical state).
+    await attachCanonicalToFact({
+      factId: fact.id,
+      canonicalId: null,
+      status: "skipped",
+      error: "extract_or_mixture",
+      reason: COMPOUND_AUTHORITY_REASONS.extractDetected,
+    });
+    return;
+  }
+
+  // 2) PubChem path. Both calls go through the gate.
+  let cid: number | null;
+  try {
+    cid = await fetchPubChemCid(fact.compound, ctx.gate, {
+      ...(ctx.fetchImpl ? { fetchImpl: ctx.fetchImpl } : {}),
+    });
+  } catch (err) {
+    if (err instanceof PubChemRateLimited) {
+      // Pause already applied; do not move the fact to failed (it
+      // is a server signal, not a name problem). The next scheduled
+      // run will re-pick it.
+      logger.warn(
+        { factId: fact.id, retryAfterMs: err.retryAfterMs },
+        "compound_authority_backfill_rate_limited_skipping_fact",
+      );
+      return;
+    }
+    throw err;
+  }
+
+  if (cid == null) {
+    await handleMiss(fact, "pubchem 404 not found", summary);
+    return;
+  }
+
+  let props: PubChemProperties | null = null;
+  try {
+    props = await fetchPubChemProperties(cid, ctx.gate, {
+      ...(ctx.fetchImpl ? { fetchImpl: ctx.fetchImpl } : {}),
+    });
+  } catch (err) {
+    if (err instanceof PubChemRateLimited) {
+      logger.warn(
+        { factId: fact.id, retryAfterMs: err.retryAfterMs },
+        "compound_authority_backfill_props_rate_limited",
+      );
+      return;
+    }
+    throw err;
+  }
+  if (props == null) {
+    await handleMiss(fact, "pubchem 404 not found (props)", summary);
+    return;
+  }
+
+  // 3) Upsert canonical + write a starter alias for the fact's
+  //    compound name (so the next pass hits the alias map).
+  const canonical = await upsertCanonicalByPubChem({
+    cid: props.cid,
+    canonicalName: fact.compound,
+    inchiKey: props.inchiKey,
+    formula: props.formula,
+    iupac: props.iupac,
+  });
+  try {
+    await upsertAlias({
+      compoundId: canonical.id,
+      alias: fact.compound,
+      source: "pubchem",
+      confidence: "medium",
+    });
+  } catch (err) {
+    // Alias insert failure is non-fatal — the canonical row is
+    // committed and a retry on a later pass will re-upsert the alias.
+    logger.warn(
+      { err, factId: fact.id, canonicalId: canonical.id },
+      "compound_authority_backfill_alias_upsert_failed",
+    );
+  }
+
+  // 4) Stamp verified.
+  await attachCanonicalToFact({
+    factId: fact.id,
+    canonicalId: canonical.id,
+    status: "verified",
+    reason: COMPOUND_AUTHORITY_REASONS.pubchemResolved,
+  });
+  summary.pubchemHits++;
+}
+
+async function handleMiss(
+  fact: PendingFactRow,
+  errorMessage: string,
+  summary: BackfillSummary,
+): Promise<void> {
+  const nextAttempts = (fact.compound_authority_attempts ?? 0) + 1;
+  const max = COMPOUND_AUTHORITY_DEFAULT_MAX_RETRIES;
+  if (nextAttempts >= max) {
+    await attachCanonicalToFact({
+      factId: fact.id,
+      canonicalId: null,
+      status: "failed",
+      error: errorMessage,
+      reason: COMPOUND_AUTHORITY_REASONS.pubchemMiss,
+      attempts: nextAttempts,
+    });
+    summary.failed++;
+  } else {
+    await attachCanonicalToFact({
+      factId: fact.id,
+      canonicalId: null,
+      status: "pending",
+      error: errorMessage,
+      reason: COMPOUND_AUTHORITY_REASONS.pubchemMiss,
+      attempts: nextAttempts,
+    });
+    summary.retriesScheduled++;
+    summary.pubchemMisses++;
+  }
+}

@@ -14,6 +14,7 @@
     "migrate:new": "supabase migration new",
     "normalize:measurements": "bun run scripts/normalize-measurements.ts",
     "normalize:taxonomy": "bun run scripts/normalize-taxonomy.ts",
+    "seed:compounds": "bun run scripts/seed/load-compounds.ts",
     "redeploy": "docker compose build bioagents && docker compose up -d --force-recreate bioagents",
     "start": "bun src/index.ts",
     "worker": "bun src/worker.ts",

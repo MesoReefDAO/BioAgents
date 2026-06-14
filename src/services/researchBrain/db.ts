@@ -1359,6 +1359,17 @@ export async function updateBioprospectingFactEntities(params: {
   // The row is best-effort; an audit-write failure is logged and
   // surfaced to the caller (which re-throws) but the user-facing
   // fact row is already correct.
+  //
+  // Spec contract (PR #3 of bioprospecting-compound-authority): the
+  // editor flow writes TWO audit rows for compound text changes on
+  // a fact that previously had a canonical id:
+  //   1. `manual_edit`     — captures the text diff (old/new compound)
+  //   2. `status_change`   — captures the authority state transition
+  //                          (status flip to `pending`; canonical id
+  //                          snapshot is preserved). Reason
+  //                          `'edit_reset'` signals the reset was
+  //                          driven by an editor's text change, not
+  //                          by the worker.
   if (compoundChanged && priorCanonicalId) {
     try {
       const oldAuditValue = {
@@ -1393,6 +1404,44 @@ export async function updateBioprospectingFactEntities(params: {
           "compound_authority_edit_audit_insert_failed",
         );
         throw auditError;
+      }
+
+      // Second audit row: status_change event type. The
+      // `compound_canonical_id` is intentionally kept (as a snapshot)
+      // on both old and new values to match the spec's "audit
+      // anchor" contract — clearing it would orphan the history. The
+      // `compound_authority_status` flips to `pending`; the
+      // resolution to `verified`/`failed` happens on the next worker
+      // tick, not synchronously here.
+      const priorStatus =
+        (priorAuthorityStatus as
+          | "pending"
+          | "verified"
+          | "failed"
+          | "skipped"
+          | null) ?? "pending";
+      const { error: statusAuditError } = await supabase
+        .from("compound_authority_audit")
+        .insert({
+          fact_id: params.factId,
+          event_type: "status_change" as const,
+          old_value: {
+            compound_authority_status: priorStatus,
+            compound_canonical_id: priorCanonicalId,
+          },
+          new_value: {
+            compound_authority_status: "pending" as const,
+            compound_canonical_id: priorCanonicalId,
+          },
+          user_id: params.correctedBy ?? null,
+          reason: "edit_reset",
+        });
+      if (statusAuditError) {
+        logger.error(
+          { err: statusAuditError, factId: params.factId },
+          "compound_authority_edit_status_audit_insert_failed",
+        );
+        throw statusAuditError;
       }
     } catch (auditErr) {
       // Best-effort: log the failure but still return the updated

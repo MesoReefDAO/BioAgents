@@ -863,13 +863,65 @@ export const emptyStamp: CompoundAuthorityStamp = { ...EMPTY_STAMP };
 const PUBCHEM_BASE = "https://pubchem.ncbi.nlm.nih.gov/rest/pug";
 const PUBCHEM_TIMEOUT_MS = 12_000;
 
-/** Default requests per second. Overridable via env (PR #3 will wire
- * `COMPOUND_AUTHORITY_RATE_LIMIT_RPS`; this constant is the in-code
- * default the worker reads). */
+/** Default requests per second. Overridable via env
+ * `COMPOUND_AUTHORITY_RATE_LIMIT_RPS` (read once at module load by
+ * `getCompoundAuthorityConfig`). */
 export const COMPOUND_AUTHORITY_DEFAULT_RPS = 4;
 
-/** Default max retry attempts before a fact is moved to `failed`. */
+/** Default max retry attempts before a fact is moved to `failed`.
+ * Overridable via env `COMPOUND_AUTHORITY_MAX_RETRIES` (read once at
+ * module load by `getCompoundAuthorityConfig`). */
 export const COMPOUND_AUTHORITY_DEFAULT_MAX_RETRIES = 5;
+
+/**
+ * Configuration snapshot read once at module load from `process.env`.
+ * The spec requires env vars to be read at worker init and NOT
+ * re-read mid-cycle; this object is the read-time contract.
+ *
+ * Resolution rules (mirrors the spec's "Default values apply when env
+ * is empty" scenario):
+ *   - missing / non-numeric / non-positive -> use the in-code default
+ *   - floats are floored
+ *
+ * Tests that need to exercise env-driven values should call
+ * `getCompoundAuthorityConfig()` after setting `process.env.*` BEFORE
+ * importing the module — or, for the `rps` path that flows through
+ * `RateGate`, pass `rps` explicitly via `NormalizeBackfillParams.rps`
+ * or to the `RateGate` constructor.
+ */
+export type CompoundAuthorityConfig = {
+  rateLimitRps: number;
+  maxRetries: number;
+};
+
+function parsePositiveIntEnv(
+  raw: string | undefined,
+  fallback: number,
+): number {
+  if (raw == null) return fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return fallback;
+  return Math.max(1, Math.floor(n));
+}
+
+/** Read the worker config from env. Called once at module load and
+ * exposed for the worker to thread into the driver. */
+export function getCompoundAuthorityConfig(): CompoundAuthorityConfig {
+  return {
+    rateLimitRps: parsePositiveIntEnv(
+      process.env.COMPOUND_AUTHORITY_RATE_LIMIT_RPS,
+      COMPOUND_AUTHORITY_DEFAULT_RPS,
+    ),
+    maxRetries: parsePositiveIntEnv(
+      process.env.COMPOUND_AUTHORITY_MAX_RETRIES,
+      COMPOUND_AUTHORITY_DEFAULT_MAX_RETRIES,
+    ),
+  };
+}
+
+/** Cached config snapshot — read once at module load per the spec. */
+export const COMPOUND_AUTHORITY_CONFIG: CompoundAuthorityConfig =
+  getCompoundAuthorityConfig();
 
 /**
  * Backoff schedule (ms) for the `compound_authority_at` re-check
@@ -1302,8 +1354,14 @@ export type NormalizeBackfillParams = {
   limit?: number;
   dryRun?: boolean;
   onlyMissing?: boolean;
-  /** Override the rate (req/s) — useful for tests. */
+  /** Override the rate (req/s). Defaults to the env-driven config
+   * (`COMPOUND_AUTHORITY_RATE_LIMIT_RPS` or
+   * `COMPOUND_AUTHORITY_DEFAULT_RPS` as fallback). */
   rps?: number;
+  /** Override the max retries. Defaults to the env-driven config
+   * (`COMPOUND_AUTHORITY_MAX_RETRIES` or
+   * `COMPOUND_AUTHORITY_DEFAULT_MAX_RETRIES` as fallback). */
+  maxRetries?: number;
   /** Inject a custom fetch implementation (tests). */
   fetchImpl?: typeof fetch;
   /** Inject a clock (tests). */
@@ -1355,7 +1413,14 @@ export async function normalizeBioprospectingCompounds(
 ): Promise<BackfillSummary> {
   const limit = Math.max(1, Math.min(MAX_BACKFILL_LIMIT, params.limit ?? 50));
   const onlyMissing = params.onlyMissing ?? true;
-  const rps = params.rps ?? COMPOUND_AUTHORITY_DEFAULT_RPS;
+  // Resolve rate limit / max retries from the env-driven config
+  // (read once at module load) and fall back to in-code defaults
+  // when neither env nor explicit override is present. The spec
+  // mandates reading at init time and not re-reading mid-cycle.
+  const rps =
+    params.rps ?? COMPOUND_AUTHORITY_CONFIG.rateLimitRps;
+  const maxRetries =
+    params.maxRetries ?? COMPOUND_AUTHORITY_CONFIG.maxRetries;
   const gate = new RateGate({ rps, ...(params.now ? { now: params.now } : {}) });
   const startedAt = Date.now();
   const summary: BackfillSummary = {
@@ -1372,7 +1437,7 @@ export async function normalizeBioprospectingCompounds(
   const aliasMap = await loadAliasMap();
 
   // 2) Load the eligible fact set.
-  const facts = await selectPendingFacts({ limit, onlyMissing });
+  const facts = await selectPendingFacts({ limit, onlyMissing, maxRetries });
   summary.scannedFacts = facts.length;
   if (facts.length === 0) {
     summary.elapsed = Date.now() - startedAt;
@@ -1389,7 +1454,12 @@ export async function normalizeBioprospectingCompounds(
       continue;
     }
     try {
-      await processOneFact(fact, { aliasMap, gate, fetchImpl: params.fetchImpl }, summary);
+      await processOneFact(
+        fact,
+        { aliasMap, gate, fetchImpl: params.fetchImpl },
+        summary,
+        maxRetries,
+      );
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       logger.error(
@@ -1416,6 +1486,7 @@ type PendingFactRow = {
 async function selectPendingFacts(opts: {
   limit: number;
   onlyMissing: boolean;
+  maxRetries: number;
 }): Promise<PendingFactRow[]> {
   const recheckIso = new Date(
     Date.now() - RECHECK_WINDOW_HOURS * 60 * 60 * 1000,
@@ -1432,7 +1503,7 @@ async function selectPendingFacts(opts: {
   if (opts.onlyMissing) {
     // Compound predicate: attempts<MAX OR at IS NULL OR at<NOW()-24h
     // PostgREST can't express a multi-clause OR cleanly; we use OR.
-    const max = COMPOUND_AUTHORITY_DEFAULT_MAX_RETRIES;
+    const max = opts.maxRetries;
     query = query.or(
       `compound_authority_attempts.lt.${max},compound_authority_at.is.null,compound_authority_at.lt.${recheckIso}`,
     );
@@ -1465,6 +1536,7 @@ async function processOneFact(
   fact: PendingFactRow,
   ctx: ProcessCtx,
   summary: BackfillSummary,
+  maxRetries: number,
 ): Promise<void> {
   // 1) Re-check the alias map (in case an admin added one since the fact was extracted).
   const initial = resolveInitialStatus(fact.compound, ctx.aliasMap);
@@ -1511,7 +1583,7 @@ async function processOneFact(
   }
 
   if (cid == null) {
-    await handleMiss(fact, "pubchem 404 not found", summary);
+    await handleMiss(fact, "pubchem 404 not found", summary, maxRetries);
     return;
   }
 
@@ -1531,7 +1603,7 @@ async function processOneFact(
     throw err;
   }
   if (props == null) {
-    await handleMiss(fact, "pubchem 404 not found (props)", summary);
+    await handleMiss(fact, "pubchem 404 not found (props)", summary, maxRetries);
     return;
   }
 
@@ -1574,9 +1646,10 @@ async function handleMiss(
   fact: PendingFactRow,
   errorMessage: string,
   summary: BackfillSummary,
+  maxRetries: number,
 ): Promise<void> {
   const nextAttempts = (fact.compound_authority_attempts ?? 0) + 1;
-  const max = COMPOUND_AUTHORITY_DEFAULT_MAX_RETRIES;
+  const max = maxRetries;
   if (nextAttempts >= max) {
     await attachCanonicalToFact({
       factId: fact.id,

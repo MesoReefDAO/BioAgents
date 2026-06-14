@@ -227,7 +227,11 @@ describe("updateBioprospectingFactEntities — edit-reset audit (compound change
           data: makeFactWithCanonical({ compound: "Curcuma longa extract" }),
           error: null,
         },
-        // 3) audit insert (await on the .insert() chain via .then)
+        // 3) manual_edit audit insert (await on the .insert() chain via .then)
+        { kind: "many", data: [], error: null },
+        // 4) status_change audit insert (second audit row — the spec
+        //    mandates BOTH rows for an editor-driven compound change
+        //    on a fact that previously had a canonical id).
         { kind: "many", data: [], error: null },
       ],
       calls,
@@ -255,21 +259,43 @@ describe("updateBioprospectingFactEntities — edit-reset audit (compound change
 
     // A manual_edit audit row was written.
     const auditInserts = findAuditInserts();
-    expect(auditInserts).toHaveLength(1);
-    const audit = auditInserts[0] as Record<string, unknown>;
-    expect(audit.fact_id).toBe(FACT_ID);
-    expect(audit.event_type).toBe("manual_edit");
-    expect(audit.user_id).toBe(USER_ID);
-    expect(audit.reason).toBe("compound_text_changed");
+    expect(auditInserts).toHaveLength(2);
+    const manualEditAudit = auditInserts.find(
+      (a) => (a as Record<string, unknown>).event_type === "manual_edit",
+    ) as Record<string, unknown> | undefined;
+    expect(manualEditAudit).toBeDefined();
+    expect(manualEditAudit?.fact_id).toBe(FACT_ID);
+    expect(manualEditAudit?.user_id).toBe(USER_ID);
+    expect(manualEditAudit?.reason).toBe("compound_text_changed");
 
-    // The audit row's old + new values capture the diff.
-    const oldValue = audit.old_value as Record<string, unknown>;
-    const newValue = audit.new_value as Record<string, unknown>;
+    // The manual_edit row's old + new values capture the diff.
+    const oldValue = manualEditAudit?.old_value as Record<string, unknown>;
+    const newValue = manualEditAudit?.new_value as Record<string, unknown>;
     expect(oldValue.compound).toBe("diferuloylmethane");
     expect(oldValue.compound_canonical_id).toBe(CANONICAL_ID);
     expect(oldValue.compound_authority_status).toBe("verified");
     expect(newValue.compound).toBe("Curcuma longa extract");
     expect(newValue.compound_authority_status).toBe("pending");
+
+    // A second status_change audit row was also written — the spec
+    // (PR #3 of bioprospecting-compound-authority) requires BOTH
+    // rows for an editor-driven compound text change on a fact
+    // that previously had a canonical id.
+    const statusChangeAudit = auditInserts.find(
+      (a) => (a as Record<string, unknown>).event_type === "status_change",
+    ) as Record<string, unknown> | undefined;
+    expect(statusChangeAudit).toBeDefined();
+    expect(statusChangeAudit?.fact_id).toBe(FACT_ID);
+    expect(statusChangeAudit?.user_id).toBe(USER_ID);
+    expect(statusChangeAudit?.reason).toBe("edit_reset");
+    const statusOld = statusChangeAudit?.old_value as Record<string, unknown>;
+    const statusNew = statusChangeAudit?.new_value as Record<string, unknown>;
+    expect(statusOld.compound_authority_status).toBe("verified");
+    expect(statusOld.compound_canonical_id).toBe(CANONICAL_ID);
+    expect(statusNew.compound_authority_status).toBe("pending");
+    // The canonical id is intentionally kept on the new side too —
+    // clearing it would orphan the audit trail.
+    expect(statusNew.compound_canonical_id).toBe(CANONICAL_ID);
   });
 });
 

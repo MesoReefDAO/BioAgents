@@ -32,11 +32,20 @@ async function main() {
   const documentIngestionWorker = createDocumentIngestionWorker();
   const bioprospectingWorker = createBioprospectingWorker();
   // Compound-authority worker is gated by COMPOUND_AUTHORITY_ENABLED
-  // (default true) at the queue layer; the worker itself always starts
-  // so manual enqueueing via Bull Board is possible even when the
-  // scheduled repeat is disabled. Note: the worker IDLES when no jobs
-  // are present, so there is no per-tick cost in the disabled case.
-  const compoundAuthorityWorker = createCompoundAuthorityWorker();
+  // (default true). When disabled, the worker is NOT created at all
+  // — mirrors the queue layer's repeat-skip behavior and satisfies
+  // the spec's "the worker does not start" contract.
+  const compoundAuthorityEnabled =
+    process.env.COMPOUND_AUTHORITY_ENABLED !== "false";
+  const compoundAuthorityWorker = compoundAuthorityEnabled
+    ? createCompoundAuthorityWorker()
+    : null;
+  if (!compoundAuthorityEnabled) {
+    logger.info(
+      { env: "COMPOUND_AUTHORITY_ENABLED=false" },
+      "compound_authority_worker_disabled",
+    );
+  }
 
   logger.info(
     {
@@ -65,8 +74,14 @@ async function main() {
       paperGenerationWorker.close().then(() => logger.info("paper_generation_worker_closed")),
       documentIngestionWorker.close().then(() => logger.info("document_ingestion_worker_closed")),
       bioprospectingWorker.close().then(() => logger.info("bioprospecting_worker_closed")),
-      compoundAuthorityWorker.close().then(() => logger.info("compound_authority_worker_closed")),
     ];
+    if (compoundAuthorityWorker) {
+      closePromises.push(
+        compoundAuthorityWorker
+          .close()
+          .then(() => logger.info("compound_authority_worker_closed")),
+      );
+    }
 
     logger.info("waiting_for_all_workers_to_finish_current_jobs");
     await Promise.all(closePromises);

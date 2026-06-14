@@ -5,13 +5,20 @@
  * `compound-authority` job) it calls
  * `normalizeBioprospectingCompounds`, which:
  *   - re-checks each pending fact against the in-memory alias map
- *   - on miss, calls PubChem at 4 rps (gate-enforced)
+ *   - on miss, calls PubChem at the env-configured rps (gate-enforced)
  *   - writes canonical/alias rows and stamps the fact with
  *     `verified` / `pending` / `failed`
  *
  * The worker runs with `concurrency: 1` so a single in-process gate
  * is sufficient for rate-limiting. BullMQ's built-in limiter is not
  * used — it cannot honor PubChem's per-response `Retry-After` header.
+ *
+ * Configuration is read once at worker startup via
+ * `getCompoundAuthorityConfig()` (which reads
+ * `COMPOUND_AUTHORITY_RATE_LIMIT_RPS` and
+ * `COMPOUND_AUTHORITY_MAX_RETRIES` from `process.env`). The spec
+ * mandates the read-once contract — env vars are NOT re-read
+ * mid-cycle.
  *
  * Spawned from `src/worker.ts` alongside the other workers.
  */
@@ -20,7 +27,10 @@ import { Worker, Job } from "bullmq";
 import { getBullMQConnection } from "../connection";
 import type { CompoundAuthorityJobData, CompoundAuthorityJobResult } from "../types";
 import logger from "../../../utils/logger";
-import { normalizeBioprospectingCompounds } from "../../researchBrain/compoundAuthority";
+import {
+  normalizeBioprospectingCompounds,
+  getCompoundAuthorityConfig,
+} from "../../researchBrain/compoundAuthority";
 
 /**
  * Create and start the compound-authority worker. Returns the
@@ -32,9 +42,12 @@ export function createCompoundAuthorityWorker(): Worker<
 > {
   const connection = getBullMQConnection();
   // Concurrency is fixed at 1 — the in-process RateGate enforces the
-  // 4 rps cap on PubChem, and multiple workers would defeat the
+  // rps cap on PubChem, and multiple workers would defeat the
   // closure-based gate. Override via env for emergency scaling only.
   const concurrency = 1;
+  // Read the env-driven config once at worker startup. The
+  // spec mandates read-once — mid-cycle re-reads are not allowed.
+  const config = getCompoundAuthorityConfig();
 
   const worker = new Worker<
     CompoundAuthorityJobData,
@@ -72,7 +85,10 @@ export function createCompoundAuthorityWorker(): Worker<
     );
   });
 
-  logger.info({ concurrency }, "compound_authority_worker_started");
+  logger.info(
+    { concurrency, rateLimitRps: config.rateLimitRps, maxRetries: config.maxRetries },
+    "compound_authority_worker_started",
+  );
 
   return worker;
 }
@@ -82,7 +98,15 @@ async function processCompoundAuthorityJob(
 ): Promise<CompoundAuthorityJobResult> {
   logger.info({ jobId: job.id }, "compound_authority_job_started");
   try {
-    const summary = await normalizeBioprospectingCompounds({});
+    // Thread the env-driven config through to the driver. The
+    // driver itself falls back to the module-level cached config
+    // when params are absent, but we pass them explicitly so the
+    // read-once contract is honored at this layer.
+    const config = getCompoundAuthorityConfig();
+    const summary = await normalizeBioprospectingCompounds({
+      rps: config.rateLimitRps,
+      maxRetries: config.maxRetries,
+    });
     logger.info(
       {
         jobId: job.id,

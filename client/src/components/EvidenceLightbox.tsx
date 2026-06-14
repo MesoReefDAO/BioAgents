@@ -153,6 +153,40 @@ export function EvidenceLightbox({
             <span className="evidence-lightbox__subtitle">
               Fact {factId ?? "—"}
             </span>
+            {/*
+              PR #3 of `bioprospecting-compound-authority` — show
+              InChIKey + PubChem CID in the lightbox header when
+              the fact has a resolved canonical. The compound object
+              is populated by the server-side embed added in
+              `getBioprospectingFact` (FK to `research_compounds`).
+              The block is hidden entirely when the fact has no
+              canonical (the resolve is still pending or was an
+              extract). The user still gets the badge on the fact
+              card outside the lightbox, so the absence of the
+              block here is consistent with "nothing to show yet".
+            */}
+            {data?.compound?.canonicalName ? (
+              <div className="evidence-lightbox__compound">
+                <span className="evidence-lightbox__compound-name">
+                  {data.compound.canonicalName}
+                </span>
+                {data.compound.inchiKey ? (
+                  <span className="evidence-lightbox__compound-meta">
+                    InChIKey: <code>{data.compound.inchiKey}</code>
+                  </span>
+                ) : null}
+                {data.compound.pubchemCid != null ? (
+                  <span className="evidence-lightbox__compound-meta">
+                    PubChem CID: <code>{data.compound.pubchemCid}</code>
+                  </span>
+                ) : null}
+                {data.compound.molecularFormula ? (
+                  <span className="evidence-lightbox__compound-meta">
+                    Formula: <code>{data.compound.molecularFormula}</code>
+                  </span>
+                ) : null}
+              </div>
+            ) : null}
           </div>
           <div className="evidence-lightbox__actions">
             <button

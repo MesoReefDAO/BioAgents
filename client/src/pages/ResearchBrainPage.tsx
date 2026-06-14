@@ -2,6 +2,7 @@ import { route } from "preact-router";
 import { useState } from "preact/hooks";
 import { Icon } from "../components/icons";
 import { ProvenanceBadge } from "../components/ProvenanceBadge";
+import { CompoundAuthorityBadge } from "../components/CompoundAuthorityBadge";
 import { openProvenanceLightbox } from "../utils/provenanceTrigger";
 import {
   reextractResearchBrainSource,
@@ -692,7 +693,48 @@ export function ResearchBrainPage({ coralGptMode = false }: Props) {
                           )}
 
                         <div className="brain-fact-fields">
-                          {fact.compound && <span>{fact.compound}</span>}
+                          {/*
+                            PR #3 of `bioprospecting-compound-authority`
+                            — render the CompoundAuthorityBadge next to
+                            the raw `compound` value when canonical
+                            resolution has produced a different
+                            display name (or the resolution is
+                            pending / failed). The component is
+                            responsible for hiding itself when the
+                            value is an extract (`skipped`) or when
+                            the canonical name matches the raw text
+                            (no diff to show). When the badge hides
+                            itself, we still render the raw text so
+                            the user sees the original compound name.
+                          */}
+                          {fact.compound && (
+                            <>
+                              {fact.compoundAuthorityStatus ? (
+                                <CompoundAuthorityBadge
+                                  compound={fact.compound}
+                                  compoundCanonicalId={
+                                    fact.compoundCanonicalId ?? null
+                                  }
+                                  compoundAuthorityStatus={
+                                    fact.compoundAuthorityStatus
+                                  }
+                                  compoundAuthorityError={
+                                    fact.compoundAuthorityError ?? null
+                                  }
+                                  canonicalName={
+                                    fact.compoundCanonicalName ?? null
+                                  }
+                                  inchiKey={fact.compoundInchiKey ?? null}
+                                  pubchemCid={
+                                    fact.compoundPubchemCid ?? null
+                                  }
+                                  variant="card"
+                                />
+                              ) : (
+                                <span>{fact.compound}</span>
+                              )}
+                            </>
+                          )}
                           {fact.compoundClass && (
                             <span>{fact.compoundClass}</span>
                           )}

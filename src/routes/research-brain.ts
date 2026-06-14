@@ -3,10 +3,12 @@ import { mkdir } from "fs/promises";
 import path from "path";
 import { authResolver } from "../middleware/authResolver";
 import {
+  addAlias,
   backfillBioprospectingMeasurements,
   extractBioprospectingFactsForSource,
   extractClaimsForSource,
   getBioprospectingFact,
+  getCanonicalById,
   getClaim,
   getContradictionsForSource,
   getSource,
@@ -15,9 +17,11 @@ import {
   listResearchTaxa,
   listSources,
   normalizeBioprospectingTaxonomy,
+  promoteFactToPending,
   researchBrainSearch,
   resolveBioprospectingContradiction,
   searchBioprospectingFacts,
+  searchCompoundsByName,
   updateBioprospectingFactEntities,
   updateBioprospectingFactReview,
   updateBioprospectingFactsReviewBulk,
@@ -1211,8 +1215,9 @@ export const researchBrainRoute = new Elysia({ prefix: "/api/research-brain" })
       try {
         // 1. Single round-trip load: the SELECT in
         //    getBioprospectingFact already embeds source, chunk,
-        //    evidence_table, and evidence_figure (per the spec's
-        //    "Supabase foreign-key embed syntax" rule).
+        //    evidence_table, evidence_figure, and (PR #3)
+        //    compound_canonical (per the spec's "Supabase foreign-key
+        //    embed syntax" rule).
         const fact = await getBioprospectingFact(factId);
         if (!fact) {
           set.status = 404;
@@ -1222,6 +1227,29 @@ export const researchBrainRoute = new Elysia({ prefix: "/api/research-brain" })
         const sourceTitle = fact.source?.title || "";
         const doi = fact.doi ?? fact.source?.doi ?? null;
         const sourceId = fact.source_id ?? fact.source?.id ?? null;
+
+        // PR #3 of bioprospecting-compound-authority: the
+        // compound_canonical embed (added to getBioprospectingFact)
+        // supplies canonical_name / inchi_key / pubchem_cid. The
+        // lightbox reads this block to surface InChIKey + PubChem
+        // CID on click per the spec's "Provenance viewer" rule.
+        const compound = (fact as any).compound_canonical
+          ? {
+              canonicalName: (fact as any).compound_canonical.canonical_name ?? null,
+              inchiKey: (fact as any).compound_canonical.inchi_key ?? null,
+              pubchemCid: (fact as any).compound_canonical.pubchem_cid ?? null,
+              molecularFormula:
+                (fact as any).compound_canonical.molecular_formula ?? null,
+            }
+          : null;
+        const compoundAuthority = {
+          status:
+            (fact as any).compound_authority_status ?? null,
+          canonicalId: (fact as any).compound_canonical_id ?? null,
+          at: (fact as any).compound_authority_at ?? null,
+          error: (fact as any).compound_authority_error ?? null,
+          attempts: (fact as any).compound_authority_attempts ?? null,
+        };
 
         // 2. Precedence per spec §6.3:
         //      a. evidence_table_id + row resolvable  → "table"
@@ -1239,6 +1267,8 @@ export const researchBrainRoute = new Elysia({ prefix: "/api/research-brain" })
             sourceId,
             sourceTitle,
             doi,
+            compound,
+            compoundAuthority,
             provenance: {
               type: "table",
               table: {
@@ -1273,6 +1303,8 @@ export const researchBrainRoute = new Elysia({ prefix: "/api/research-brain" })
             sourceId,
             sourceTitle,
             doi,
+            compound,
+            compoundAuthority,
             provenance: {
               type: "figure",
               table: null,
@@ -1302,6 +1334,8 @@ export const researchBrainRoute = new Elysia({ prefix: "/api/research-brain" })
             sourceId,
             sourceTitle,
             doi,
+            compound,
+            compoundAuthority,
             provenance: {
               type: "chunk",
               table: null,
@@ -1326,6 +1360,8 @@ export const researchBrainRoute = new Elysia({ prefix: "/api/research-brain" })
           sourceId,
           sourceTitle,
           doi,
+          compound,
+          compoundAuthority,
           provenance: {
             type: "text-only",
             table: null,
@@ -1347,6 +1383,192 @@ export const researchBrainRoute = new Elysia({ prefix: "/api/research-brain" })
       }
     },
     { beforeHandle: authResolver({ required: false }) },
+  )
+  // -------------------------------------------------------------------------
+  // Compound Authority API (PR #3 of
+  // `bioprospecting-compound-authority`).
+  //
+  // Four routes expose the compound authority subsystem to the admin UI:
+  //   1. GET  /compounds/search?q=&limit=           — public read; search
+  //   2. GET  /compounds/:canonicalId               — public read; lookup
+  //   3. POST /compounds/:canonicalId/aliases       — admin only; add alias
+  //   4. POST /facts/:factId/authority/promote      — admin only; re-promote
+  //
+  // Routes 1 + 2 are `required: false` because compound metadata is
+  // not user PII. Routes 3 + 4 are admin-only because they mutate
+  // canonical state and the audit trail.
+  // -------------------------------------------------------------------------
+  .get(
+    "/compounds/search",
+    async ({ query, set }) => {
+      const parsed = (query || {}) as { q?: string; limit?: string };
+      const q = (parsed.q || "").trim();
+      if (!q) {
+        set.status = 400;
+        return { error: "missing query parameter q" };
+      }
+      const limit = parsed.limit
+        ? Math.max(1, Math.min(100, Number(parsed.limit) || 25))
+        : 25;
+      try {
+        const results = await searchCompoundsByName(q, limit);
+        return { results };
+      } catch (error: any) {
+        logger.error(
+          { err: error, q, limit },
+          "compound_authority_search_failed",
+        );
+        set.status = 500;
+        return {
+          error: "Failed to search compounds",
+          message: error?.message,
+        };
+      }
+    },
+    { beforeHandle: authResolver({ required: false }) },
+  )
+  .get(
+    "/compounds/:canonicalId",
+    async ({ params, set }) => {
+      const { canonicalId } = params;
+      if (!canonicalId) {
+        set.status = 400;
+        return { error: "Missing canonicalId" };
+      }
+      try {
+        const compound = await getCanonicalById(canonicalId);
+        if (!compound) {
+          set.status = 404;
+          return { error: "Compound not found" };
+        }
+        return { compound };
+      } catch (error: any) {
+        logger.error(
+          { err: error, canonicalId },
+          "compound_authority_get_failed",
+        );
+        set.status = 500;
+        return {
+          error: "Failed to load compound",
+          message: error?.message,
+        };
+      }
+    },
+    { beforeHandle: authResolver({ required: false }) },
+  )
+  .post(
+    "/compounds/:canonicalId/aliases",
+    async ({ params, body, request, set }) => {
+      const { canonicalId } = params;
+      if (!canonicalId) {
+        set.status = 400;
+        return { error: "Missing canonicalId" };
+      }
+      const parsed = (body || {}) as {
+        alias?: string;
+        confidence?: "high" | "medium" | "low";
+      };
+      const alias = (parsed.alias || "").trim();
+      if (!alias) {
+        set.status = 400;
+        return { error: "Missing alias" };
+      }
+      const confidence = parsed.confidence;
+      if (
+        confidence !== "high" &&
+        confidence !== "medium" &&
+        confidence !== "low"
+      ) {
+        set.status = 400;
+        return { error: "Invalid confidence. Use: high|medium|low" };
+      }
+      const userId = (request as any).auth?.userId;
+      if (!userId) {
+        // Defense-in-depth: authResolver({ required: true, role: 'admin' })
+        // should have rejected this already.
+        set.status = 401;
+        return { error: "Authentication required" };
+      }
+      try {
+        const result = await addAlias({
+          canonicalId,
+          alias,
+          confidence,
+          userId,
+          source: "manual",
+        });
+        set.status = 201;
+        return { id: result.id };
+      } catch (error: any) {
+        logger.error(
+          { err: error, canonicalId, alias },
+          "compound_authority_alias_add_failed",
+        );
+        // FK violation on a missing canonical surfaces as a
+        // Supabase error code 23503. Translate to 404.
+        const code = (error && (error.code || error?.details)) as
+          | string
+          | undefined;
+        if (
+          code === "23503" ||
+          /foreign key/i.test(error?.message ?? "")
+        ) {
+          set.status = 404;
+          return { error: "Compound not found" };
+        }
+        set.status = 500;
+        return {
+          error: "Failed to add alias",
+          message: error?.message,
+        };
+      }
+    },
+    { beforeHandle: authResolver({ required: true, role: "admin" }) },
+  )
+  .post(
+    "/facts/:factId/authority/promote",
+    async ({ params, body, request, set }) => {
+      const { factId } = params;
+      if (!factId) {
+        set.status = 400;
+        return { error: "Missing factId" };
+      }
+      const parsed = (body || {}) as { reason?: string };
+      const reason = (parsed.reason || "").trim();
+      if (!reason) {
+        set.status = 400;
+        return { error: "Missing reason" };
+      }
+      const userId = (request as any).auth?.userId;
+      if (!userId) {
+        set.status = 401;
+        return { error: "Authentication required" };
+      }
+      try {
+        await promoteFactToPending({ factId, userId, reason });
+        return { id: factId, compound_authority_status: "pending" };
+      } catch (error: any) {
+        const message = error?.message ?? "";
+        if (message === "not in failed state") {
+          set.status = 409;
+          return { error: "not in failed state" };
+        }
+        if (message === "fact not found") {
+          set.status = 404;
+          return { error: "Fact not found" };
+        }
+        logger.error(
+          { err: error, factId, reason },
+          "compound_authority_promote_failed",
+        );
+        set.status = 500;
+        return {
+          error: "Failed to promote fact",
+          message: error?.message,
+        };
+      }
+    },
+    { beforeHandle: authResolver({ required: true, role: "admin" }) },
   );
 
 export default researchBrainRoute;

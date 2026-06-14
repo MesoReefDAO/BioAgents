@@ -1,6 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { getServiceClient } from "../../db/client";
 import logger from "../../utils/logger";
+import { COMPOUND_AUTHORITY_REASONS } from "./compoundAuthority";
 import { buildIdentityKey } from "./normalize";
 import type {
   BioprospectingFact,
@@ -1296,6 +1297,54 @@ export async function updateBioprospectingFactEntities(params: {
     patch.taxonomy_error = null;
   }
 
+  // ---------------------------------------------------------------------
+  // PR #3 of `bioprospecting-compound-authority` — edit-reset hook.
+  //
+  // When the editor changes the raw `compound` text on a fact that
+  // previously had a canonical id, the authority state is reset to
+  // `pending` so the next backfill run re-resolves against the new
+  // text. A `manual_edit` audit row is written capturing the text
+  // diff AND the previous authority state. The previous
+  // `compound_canonical_id` is intentionally kept on the row as a
+  // snapshot for the audit trail — clearing it would orphan the
+  // history. The new canonical resolution is the worker's job (it
+  // runs on the next compound-authority tick); the editor flow does
+  // NOT call PubChem synchronously.
+  //
+  // Condition: compound text actually changed AND the prior state
+  // had a non-null canonical id. A pending fact whose compound text
+  // gets edited does NOT trigger the reset — the worker would
+  // already pick it up on the next tick. The new text is left
+  // un-resolved here (`compound_authority_status = 'pending'`,
+  // `compound_authority_at = null`, `compound_authority_error =
+  // null`); the worker writes the verified/failed state when it
+  // runs.
+  // ---------------------------------------------------------------------
+  let compoundChanged = false;
+  let previousCompound: string | null = null;
+  let newCompound: string | null = null;
+  if ("compound" in changedFields) {
+    compoundChanged = true;
+    previousCompound = changedFields.compound.before;
+    newCompound = changedFields.compound.after;
+  }
+
+  const priorCanonicalId = ((existing as any).compound_canonical_id as
+    | string
+    | null
+    | undefined) ?? null;
+  const priorAuthorityStatus =
+    ((existing as any).compound_authority_status as string | null | undefined) ??
+    null;
+
+  if (compoundChanged && priorCanonicalId) {
+    patch.compound_authority_status = "pending";
+    patch.compound_authority_at = null;
+    patch.compound_authority_error = null;
+    // `compound_canonical_id` is intentionally NOT cleared — it is
+    // the audit trail anchor.
+  }
+
   const { data, error } = await supabase
     .from("research_bioprospecting_facts")
     .update(patch)
@@ -1304,6 +1353,59 @@ export async function updateBioprospectingFactEntities(params: {
     .single();
 
   if (error) throw error;
+
+  // Insert the manual_edit audit row OUTSIDE the patch update so a
+  // failure here doesn't roll back the user's entity correction.
+  // The row is best-effort; an audit-write failure is logged and
+  // surfaced to the caller (which re-throws) but the user-facing
+  // fact row is already correct.
+  if (compoundChanged && priorCanonicalId) {
+    try {
+      const oldAuditValue = {
+        compound: previousCompound,
+        compound_canonical_id: priorCanonicalId,
+        compound_authority_status:
+          (priorAuthorityStatus as
+            | "pending"
+            | "verified"
+            | "failed"
+            | "skipped"
+            | null) ?? "pending",
+      };
+      const newAuditValue = {
+        compound: newCompound,
+        compound_canonical_id: priorCanonicalId,
+        compound_authority_status: "pending" as const,
+      };
+      const { error: auditError } = await supabase
+        .from("compound_authority_audit")
+        .insert({
+          fact_id: params.factId,
+          event_type: "manual_edit" as const,
+          old_value: oldAuditValue,
+          new_value: newAuditValue,
+          user_id: params.correctedBy ?? null,
+          reason: COMPOUND_AUTHORITY_REASONS.compoundTextChanged,
+        });
+      if (auditError) {
+        logger.error(
+          { err: auditError, factId: params.factId },
+          "compound_authority_edit_audit_insert_failed",
+        );
+        throw auditError;
+      }
+    } catch (auditErr) {
+      // Best-effort: log the failure but still return the updated
+      // fact so the editor sees their correction succeeded. The
+      // audit table is a forensic trail — losing one row is
+      // recoverable from the fact's metadata.entityCorrectionHistory.
+      logger.error(
+        { err: auditErr, factId: params.factId },
+        "compound_authority_edit_audit_insert_recovered",
+      );
+    }
+  }
+
   return data as BioprospectingFact;
 }
 
@@ -2096,7 +2198,8 @@ export async function getBioprospectingFactsForSource(
 
 /**
  * Fetch a single bioprospecting fact by id, with source, chunk,
- * evidence_table, and evidence_figure relations embedded.
+ * evidence_table, evidence_figure, and compound_canonical relations
+ * embedded.
  *
  * The provenance-viewer endpoint (PR #2 of
  * `bioprospecting-pdf-provenance-viewer`) uses this loader to
@@ -2105,7 +2208,11 @@ export async function getBioprospectingFactsForSource(
  * names — Supabase's embedded-resource syntax is
  * `alias:table!fk_column(*)` and the column names we have on
  * `research_bioprospecting_facts` are exactly `evidence_table_id`
- * and `evidence_figure_id`.
+ * and `evidence_figure_id`. PR #3 of
+ * `bioprospecting-compound-authority` adds the
+ * `compound_canonical:research_compounds!compound_canonical_id(*)`
+ * embed so the lightbox can show InChIKey + PubChem CID on
+ * resolved facts.
  */
 export async function getBioprospectingFact(
   factId: string,
@@ -2114,7 +2221,7 @@ export async function getBioprospectingFact(
   const { data, error } = await supabase
     .from("research_bioprospecting_facts")
     .select(
-      "*, source:research_sources(*), chunk:research_evidence_chunks(*), evidence_table:research_evidence_tables!evidence_table_id(*), evidence_figure:research_evidence_figures!evidence_figure_id(*)",
+      "*, source:research_sources(*), chunk:research_evidence_chunks(*), evidence_table:research_evidence_tables!evidence_table_id(*), evidence_figure:research_evidence_figures!evidence_figure_id(*), compound_canonical:research_compounds!compound_canonical_id(*)",
     )
     .eq("id", factId)
     .maybeSingle();

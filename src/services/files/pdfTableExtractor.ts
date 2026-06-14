@@ -68,6 +68,22 @@ export interface ExtractedTable {
   bbox: BBox;
   confidence: number;
   markdown: string;
+  /**
+   * Multi-page chain link. `null`/`undefined` = chain head.
+   * Populated by the detector's `mergeTablesAcrossPages` post-pass
+   * (see `localPdfTableProvider.ts`). Carried through persistence as
+   * `continues_from_id` and re-read on cache hit so the LLM prompt
+   * builder can walk the chain.
+   */
+  continuesFromId?: string | null;
+  /**
+   * Optional DB id. Undefined pre-INSERT (provider output). Populated
+   * after the orchestrator re-reads the just-inserted rows. Required
+   * for the override table lookup in `mergeTablesAcrossPages` (the
+   * override rows are keyed by DB id). Not persisted as a column on
+   * `ExtractedTable` itself — `continuesFromId` is the column.
+   */
+  id?: string;
 }
 
 export interface ExtractedFigure {
@@ -113,6 +129,7 @@ export type ResearchEvidenceTableRow = {
   bbox: BBox;
   extraction_provider: "local" | "mistral";
   extraction_confidence: number;
+  continues_from_id?: string | null;
   created_at?: string;
 };
 
@@ -252,23 +269,53 @@ export async function persistExtractedTables(
 ): Promise<ResearchEvidenceTableRow[]> {
   if (tables.length === 0) return [];
   const sb = getServiceClient();
-  const payload = tables.map((t) => ({
-    source_id: sourceId,
-    page: t.page,
-    table_index: t.tableIndex,
-    headers: t.headers,
-    rows: t.rows,
-    markdown: t.markdown,
-    bbox: t.bbox,
-    extraction_provider: provider,
-    extraction_confidence: t.confidence,
-  }));
+  // Two-phase insert for the multi-page chain:
+  //   Phase 1: INSERT all rows with `continues_from_id` set ONLY when
+  //            the value is a real DB id (a previous fragment's id from
+  //            a post-INSERT re-read). Heads stay NULL via the column
+  //            default; tails with synthetic per-batch pointers stay
+  //            NULL on this round.
+  //   Phase 2: For each tail whose `continuesFromId` is a synthetic
+  //            per-batch pointer (e.g. `"5-0"` = head at page 5,
+  //            tableIndex 0), look up the head's real id by
+  //            `(page, table_index)` and UPDATE `continues_from_id`.
+  //   Phase 3: Re-read all rows so callers see the resolved FKs.
+  //
+  // Why two phases: at the provider's `extract()` boundary, fragments
+  // have no DB ids. The post-pass sets `continuesFromId` to a synthetic
+  // pointer so the merge decision can be made in-memory; the pointer is
+  // resolved here to a real FK in a separate UPDATE pass.
+  const payload = tables.map((t) => {
+    const realId =
+      t.continuesFromId && !isChainPointer(t.continuesFromId)
+        ? t.continuesFromId
+        : null;
+    return {
+      source_id: sourceId,
+      page: t.page,
+      table_index: t.tableIndex,
+      headers: t.headers,
+      rows: t.rows,
+      markdown: t.markdown,
+      bbox: t.bbox,
+      extraction_provider: provider,
+      extraction_confidence: t.confidence,
+      ...(realId ? { continues_from_id: realId } : {}),
+    };
+  });
 
   const { data, error } = await sb
     .from("research_evidence_tables")
     .insert(payload)
     .select("*");
-  if (!error) return (data || []) as ResearchEvidenceTableRow[];
+  if (!error) {
+    return await resolveChainPointers(
+      sb,
+      sourceId,
+      tables,
+      (data || []) as ResearchEvidenceTableRow[],
+    );
+  }
 
   // 23505 = unique violation → some rows already exist. Re-read all
   // (source, page, table_index) tuples and return the canonical
@@ -297,6 +344,97 @@ export async function persistExtractedTables(
   }
 
   throw error;
+}
+
+/** Detect a synthetic per-batch pointer (`<page>-<tableIndex>`). Local
+ * mirror of `localPdfTableProvider.isChainPointer` — duplicated here
+ * to keep the persistence layer independent of the provider module. */
+function isChainPointer(value: string | null | undefined): boolean {
+  if (!value) return false;
+  return /^\d+-\d+$/.test(value);
+}
+
+/** Phase 2/3 of `persistExtractedTables`: resolve synthetic per-batch
+ * pointers to real DB ids, then re-read so callers see the resolved FKs.
+ * For each tail whose `continuesFromId` is a synthetic pointer
+ * (e.g. `"5-0"`), look up the head's real id by `(page, table_index)`
+ * and UPDATE the tail's `continues_from_id`. */
+async function resolveChainPointers(
+  sb: ReturnType<typeof getServiceClient>,
+  sourceId: string,
+  inputTables: ExtractedTable[],
+  insertedRows: ResearchEvidenceTableRow[],
+): Promise<ResearchEvidenceTableRow[]> {
+  if (insertedRows.length === 0) return insertedRows;
+
+  // Map (page, tableIndex) → real id for the just-inserted rows.
+  const idByPageTableIndex = new Map<string, string>();
+  for (const row of insertedRows) {
+    idByPageTableIndex.set(`${row.page}-${row.table_index}`, row.id);
+  }
+
+  // Pair each input table with its just-inserted row by (page, tableIndex).
+  // The INSERT response is in input order (Postgres insert ... returning).
+  const inputToRow = new Map<string, ResearchEvidenceTableRow>();
+  for (let i = 0; i < inputTables.length && i < insertedRows.length; i++) {
+    const t = inputTables[i];
+    inputToRow.set(`${t.page}-${t.tableIndex}`, insertedRows[i]);
+  }
+
+  // For each tail with a synthetic pointer, resolve and UPDATE.
+  const updates: { id: string; continues_from_id: string }[] = [];
+  for (const t of inputTables) {
+    if (!t.continuesFromId || !isChainPointer(t.continuesFromId)) continue;
+    const headId = idByPageTableIndex.get(t.continuesFromId);
+    if (!headId) {
+      logger.warn(
+        { sourceId, pointer: t.continuesFromId },
+        "pdf_table_chain_pointer_unresolved",
+      );
+      continue;
+    }
+    const tailRow = inputToRow.get(`${t.page}-${t.tableIndex}`);
+    if (!tailRow) continue;
+    if (tailRow.continues_from_id === headId) continue; // already set
+    updates.push({ id: tailRow.id, continues_from_id: headId });
+  }
+
+  if (updates.length === 0) return insertedRows;
+
+  // Issue UPDATEs in parallel. Supabase JS client doesn't have a
+  // batched UPDATE; one round-trip per row.
+  const updateResults = await Promise.allSettled(
+    updates.map((u) =>
+      sb
+        .from("research_evidence_tables")
+        .update({ continues_from_id: u.continues_from_id })
+        .eq("id", u.id),
+    ),
+  );
+  for (const r of updateResults) {
+    if (r.status === "rejected") {
+      logger.warn(
+        { err: r.reason, sourceId },
+        "pdf_table_chain_pointer_update_failed",
+      );
+    }
+  }
+
+  // Re-read so callers see the resolved FKs.
+  const { data: reread, error: rereadError } = await sb
+    .from("research_evidence_tables")
+    .select("*")
+    .eq("source_id", sourceId)
+    .order("page", { ascending: true })
+    .order("table_index", { ascending: true });
+  if (rereadError) {
+    logger.warn(
+      { err: rereadError, sourceId },
+      "pdf_table_chain_pointer_reread_failed",
+    );
+    return insertedRows;
+  }
+  return (reread || []) as ResearchEvidenceTableRow[];
 }
 
 /**
@@ -497,6 +635,16 @@ function rowToExtractedTable(row: ResearchEvidenceTableRow): ExtractedTable {
     bbox: row.bbox,
     confidence: Number(row.extraction_confidence),
     markdown: row.markdown,
+    // Carry the chain FK forward on cache hits so downstream consumers
+    // (prompt builder, quality gate, viewer) see the same chain shape
+    // as on a fresh extraction. `continues_from_id` is a true column
+    // on the row type, so we copy it as-is; treat the `undefined` case
+    // (pre-migration rows) the same as `null` (head).
+    continuesFromId: row.continues_from_id ?? null,
+    // Carry the row id so the post-pass can consult the override table
+    // by DB id when called post-INSERT. The provider's pre-INSERT
+    // output leaves `id` undefined and the override consult is a no-op.
+    id: row.id,
   };
 }
 

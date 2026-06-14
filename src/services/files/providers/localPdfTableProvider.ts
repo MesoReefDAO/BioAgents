@@ -57,6 +57,387 @@ export const MAX_HEADER_ROWS = 2;
 /** Minimum number of body rows for a cluster of rows to be considered a "table" at all. */
 export const MIN_BODY_ROWS = 1;
 
+/** Maximum chain depth for a multi-page table merge. A chain longer than this
+ * is treated as a single chain head plus a new chain. Defensive cap on the
+ * prompt walker's `Set<string>` cycle detection. */
+export const MAX_CHAIN_DEPTH = 10;
+
+/** Env var keys for merge mode + threshold. Read via `globalThis` memoization
+ * (TDZ-safe) in `resolveMergeConfig()`. */
+export const TABLE_MERGE_MODE_ENV = "TABLE_MERGE_MODE";
+export const TABLE_MERGE_THRESHOLD_ENV = "TABLE_MERGE_THRESHOLD";
+
+/** Hard ceiling for the merge score (0..1). */
+export const MERGE_SCORE_CEILING = 1;
+
+// ---------------------------------------------------------------------------
+// Multi-page merge post-pass
+// ---------------------------------------------------------------------------
+
+/** Merge mode controlling whether and how the detector links consecutive
+ * fragments across pages. See spec §"Multi-Page Table Continuation" mode table. */
+export type MergeMode = "hard" | "hard-confidence" | "manual";
+
+/** Per-pair override row, loaded from `research_evidence_table_merges_override`.
+ * The detector consults this BEFORE `scoreMergeCandidate` per design
+ * §"Per-pair override always wins over detector". The `tableId` and
+ * `otherTableId` match the DB ids of the two fragments being evaluated. */
+export interface MergeOverride {
+  tableId: string;
+  otherTableId: string;
+  action: "force_merge" | "force_unmerge";
+  confidenceScore?: number;
+  reason?: string;
+}
+
+/** Synthetic pointer used to chain a tail fragment to its head before
+ * the row has a real DB id. Format: `<prevPage>-<prevTableIndex>` (e.g.
+ * `"5-0"`). The persistence layer in `pdfTableExtractor.ts` recognizes
+ * this format and resolves it to a real DB id by looking up the head
+ * row by `(page, table_index)`. UUIDs never collide with this format. */
+export const CHAIN_POINTER_PREFIX = ""; // placeholder; pointers are `page-tableIndex`
+
+/** Default score threshold for `hard-confidence` mode. */
+export const DEFAULT_MERGE_THRESHOLD = 0.7;
+
+/** Weights for the 4-signal merge score. Sum = 1.0. See spec §"hard-confidence
+ * weights" and design §"Decision: Score tie-break prefers same `tableIndex`". */
+export const SCORE_WEIGHT_HEADER = 0.4;
+export const SCORE_WEIGHT_COLUMNS = 0.2;
+export const SCORE_WEIGHT_X_ANCHOR = 0.2;
+export const SCORE_WEIGHT_PAGE_DIST = 0.2;
+
+/** Regex for the negative signal: T₂'s first body row matches
+ * `Table N.` (or `Table N`). The score is forced to 0 when this matches,
+ * UNLESS an override row exists for the pair. */
+export const TABLE_PREFIX_RE = /^Table\s+\d+\.?\s*/i;
+
+/** Normalize a header for case+whitespace-insensitive comparison. */
+function normalizeHeader(s: string): string {
+  return (s || "").toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+/** Headers match iff the normalized arrays are elementwise equal AND
+ * both are non-empty. Empty headers (the detector's fallback when no
+ * descriptive cells were found) are not considered a match. */
+function headersMatch(a: string[], b: string[]): boolean {
+  if (!a || !b || a.length === 0 || b.length === 0) return false;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (normalizeHeader(a[i]) !== normalizeHeader(b[i])) return false;
+  }
+  return true;
+}
+
+/** X-anchor alignment: |T₁.bbox.x − T₂.bbox.x| ≤ X_TOLERANCE_PT (4pt). */
+function xAnchorsAligned(t1: ExtractedTable, t2: ExtractedTable): boolean {
+  return Math.abs((t1.bbox?.x ?? 0) - (t2.bbox?.x ?? 0)) <= X_TOLERANCE_PT;
+}
+
+/** Page distance = 1 AND same `tableIndex`. The strongest prior in real
+ * multi-page PDFs (see design §"Decision: Score tie-break prefers same
+ * `tableIndex`"). */
+function pageDistanceAndIndexMatch(t1: ExtractedTable, t2: ExtractedTable): boolean {
+  return t2.page - t1.page === 1 && t1.tableIndex === t2.tableIndex;
+}
+
+/** First body row of T₂ (the first non-empty row). Returns the row or
+ * `null` if T₂ has no rows. */
+function firstBodyRow(t: ExtractedTable): string[] | null {
+  if (!t.rows || t.rows.length === 0) return null;
+  for (const row of t.rows) {
+    if (row && row.some((c) => c && c.trim() && c.trim() !== "-")) return row;
+  }
+  return t.rows[0] ?? null;
+}
+
+/** Get the first cell of the first body row of T₂, lowercased and
+ * trimmed, for the negative-signal check. Returns `""` if T₂ is empty. */
+function firstCellText(t: ExtractedTable): string {
+  const row = firstBodyRow(t);
+  if (!row || row.length === 0) return "";
+  return (row[0] || "").trim();
+}
+
+/** Check whether T₂'s first body row matches `Table N.` (the negative
+ * signal). Spec §"Negative signal": if T₂'s first row matches
+ * `/^Table\s+\d+\.?/i`, the score is forced to 0. */
+function hasTablePrefix(t2: ExtractedTable): boolean {
+  const first = firstCellText(t2);
+  if (!first) return false;
+  return TABLE_PREFIX_RE.test(first);
+}
+
+/**
+ * Score 0..1 for whether T₂ is a continuation of T₁. Implements the
+ * 4-signal weighted formula from the spec. Returns 0 (forced) when
+ * T₂'s first body row matches the `Table N.` prefix.
+ *
+ * Signals and weights:
+ *   - Header match:                          0.4
+ *   - Column count match:                    0.2
+ *   - X-anchor alignment ≤ X_TOLERANCE_PT:   0.2
+ *   - Page distance = 1 AND same tableIndex: 0.2
+ *
+ * Pure function. Exported for unit tests.
+ */
+export function scoreMergeCandidate(
+  t1: ExtractedTable,
+  t2: ExtractedTable,
+): number {
+  // Negative signal: T₂ starts with "Table N." → score 0.
+  // Per the spec, an override UNCONDITIONALLY bypasses the detector
+  // (the score is never even computed in that case), so the negative
+  // signal applies only in the detector's own scoring path. The caller
+  // is responsible for the override consult BEFORE calling this.
+  if (hasTablePrefix(t2)) return 0;
+
+  let score = 0;
+  if (headersMatch(t1.headers, t2.headers)) score += SCORE_WEIGHT_HEADER;
+  const cols1 = t1.headers?.length ?? 0;
+  const cols2 = t2.headers?.length ?? 0;
+  if (cols1 > 0 && cols1 === cols2) score += SCORE_WEIGHT_COLUMNS;
+  if (xAnchorsAligned(t1, t2)) score += SCORE_WEIGHT_X_ANCHOR;
+  if (pageDistanceAndIndexMatch(t1, t2)) score += SCORE_WEIGHT_PAGE_DIST;
+  return Math.min(MERGE_SCORE_CEILING, score);
+}
+
+/** Build the synthetic per-batch pointer (the previous fragment's
+ * `(page, tableIndex)`) used to chain a tail fragment to its head
+ * BEFORE the row has a real DB id. The persistence layer resolves
+ * this to a real id by looking up the head by `(page, table_index)`. */
+function makeChainPointer(prev: ExtractedTable): string {
+  return `${prev.page}-${prev.tableIndex}`;
+}
+
+/** Check whether a `continuesFromId` value is a synthetic per-batch
+ * pointer (i.e., matches `<page>-<tableIndex>`). Used by the
+ * persistence layer to decide whether to resolve the FK. */
+export function isChainPointer(value: string | null | undefined): boolean {
+  if (!value) return false;
+  return /^\d+-\d+$/.test(value);
+}
+
+/** Look up an override for the pair `(T₁, T₂)`. Returns the override
+ * or `null`. The match is symmetric — the override table has a
+ * `(table_id, other_table_id)` composite index, so we probe both
+ * orderings. */
+function findOverride(
+  t1: ExtractedTable,
+  t2: ExtractedTable,
+  overrides: MergeOverride[],
+): MergeOverride | null {
+  if (!t1.id || !t2.id) return null;
+  for (const ov of overrides) {
+    if (
+      (ov.tableId === t1.id && ov.otherTableId === t2.id) ||
+      (ov.tableId === t2.id && ov.otherTableId === t1.id)
+    ) {
+      return ov;
+    }
+  }
+  return null;
+}
+
+/**
+ * Post-pass: patch `continuesFromId` on tail fragments of multi-page
+ * chains. Pure function. Runs after the per-page loop in `extract()`.
+ *
+ * Walks consecutive `(page, tableIndex)` pairs in ascending order and
+ * decides for each pair whether T₂ continues T₁. The decision tree:
+ *
+ *   1. Look up an override for the pair (matched by DB id, in either
+ *      order). If found:
+ *        - `force_merge`   → patch T₂.continuesFromId, return.
+ *        - `force_unmerge` → clear any prior `continuesFromId` on T₂
+ *                            that points at T₁, skip.
+ *   2. Otherwise, apply the mode logic:
+ *        - `hard`            → merge iff headers match AND no
+ *                              `Table N.` prefix on T₂.
+ *        - `hard-confidence` → merge iff score > threshold.
+ *        - `manual`          → never merge.
+ *
+ *   3. Chain depth cap at `MAX_CHAIN_DEPTH` (10): a tail beyond that
+ *      starts a new chain (the next fragment becomes a fresh head).
+ *
+ * Tie-break: when scoring, the 0.2 page-distance signal already
+ * rewards same `tableIndex` + page distance 1. The function walks
+ * pairs in `(page, tableIndex)` order, so the "same `tableIndex`
+ * wins" tie-break is implicit in the walk order (consecutive pairs
+ * on the same `tableIndex` are evaluated first).
+ *
+ * `continuesFromId` is set to:
+ *   - The previous fragment's `id` if both fragments have an id
+ *     (post-INSERT re-read case).
+ *   - A synthetic per-batch pointer (`<prevPage>-<prevTableIndex>`)
+ *     if the previous fragment has no id (pre-INSERT provider output).
+ *     The persistence layer resolves this to a real id.
+ *
+ * @param tables     Per-page `ExtractedTable[]` from `detectTablesOnPage`.
+ * @param mode       One of `"hard" | "hard-confidence" | "manual"`.
+ * @param overrides  Per-pair overrides from the DB. The detector must
+ *                   consult this list BEFORE calling `scoreMergeCandidate`.
+ *                   Pass `[]` for the in-provider call (overrides are
+ *                   consulted by the orchestrator post-INSERT).
+ * @param threshold  Score threshold for `hard-confidence` mode.
+ *                   Defaults to `DEFAULT_MERGE_THRESHOLD` (0.7).
+ */
+export function mergeTablesAcrossPages(
+  tables: ExtractedTable[],
+  mode: MergeMode,
+  overrides: MergeOverride[],
+  threshold: number = DEFAULT_MERGE_THRESHOLD,
+): ExtractedTable[] {
+  if (!tables || tables.length === 0) return tables;
+
+  // 1. Sort by (page ASC, tableIndex ASC). The walk order is the
+  //    tie-break order (same tableIndex + lower page distance = first).
+  const sorted = [...tables].sort((a, b) => {
+    if (a.page !== b.page) return a.page - b.page;
+    return a.tableIndex - b.tableIndex;
+  });
+
+  // 2. Build a fresh output array. We patch `continuesFromId` on the
+  //    sorted order, NOT on the input order — the caller sees the
+  //    output in `(page, tableIndex)` order, which matches the DB
+  //    `(source_id, page, table_index)` uniqueness ordering.
+  const out: ExtractedTable[] = sorted.map((t) => ({ ...t, continuesFromId: null }));
+
+  // 3. Walk consecutive pairs. Maintain the depth of the current chain
+  //    starting at the most recent head. When depth reaches the cap,
+  //    start a new chain.
+  let chainDepth = 0;
+  let chainHead: ExtractedTable | null = null;
+
+  for (let i = 0; i < out.length; i++) {
+    const cur = out[i];
+
+    if (i === 0) {
+      // First fragment: always a head.
+      chainHead = cur;
+      chainDepth = 1;
+      cur.continuesFromId = null;
+      continue;
+    }
+
+    const prev = out[i - 1];
+    if (!chainHead) {
+      // Shouldn't happen (we set it on i=0), but defensive.
+      chainHead = cur;
+      chainDepth = 1;
+      continue;
+    }
+
+    // Chain depth cap: once we hit MAX_CHAIN_DEPTH, the next pair
+    // starts a new chain regardless of score. The current fragment
+    // is already a head of the new chain.
+    if (chainDepth >= MAX_CHAIN_DEPTH) {
+      chainHead = cur;
+      chainDepth = 1;
+      cur.continuesFromId = null;
+      continue;
+    }
+
+    // 4. Override consult first (per design §"Per-pair override always
+    //    wins over detector"). Match by DB id; if either fragment
+    //    has no id (pre-INSERT), the consult is a no-op (the
+    //    orchestrator handles overrides post-INSERT).
+    const ov = findOverride(prev, cur, overrides);
+    if (ov) {
+      if (ov.action === "force_merge") {
+        cur.continuesFromId = prev.id ?? makeChainPointer(prev);
+        chainDepth++;
+        continue;
+      }
+      if (ov.action === "force_unmerge") {
+        // Clear any prior continuesFromId on cur that points at prev.
+        if (cur.continuesFromId === prev.id || cur.continuesFromId === makeChainPointer(prev)) {
+          cur.continuesFromId = null;
+        }
+        chainHead = cur;
+        chainDepth = 1;
+        continue;
+      }
+    }
+
+    // 5. Mode-driven scoring.
+    let shouldMerge = false;
+    if (mode === "manual") {
+      shouldMerge = false;
+    } else if (mode === "hard") {
+      // Merge iff headers match AND no "Table N." prefix on T₂.
+      shouldMerge =
+        headersMatch(prev.headers, cur.headers) && !hasTablePrefix(cur);
+    } else {
+      // "hard-confidence"
+      const score = scoreMergeCandidate(prev, cur);
+      shouldMerge = score > threshold;
+    }
+
+    if (shouldMerge) {
+      cur.continuesFromId = prev.id ?? makeChainPointer(prev);
+      chainDepth++;
+    } else {
+      chainHead = cur;
+      chainDepth = 1;
+      cur.continuesFromId = null;
+    }
+  }
+
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// TDZ-safe env resolution for merge config (mirrors resolveMode in
+// pdfTableExtractor.ts — see the TDZ note in CLAUDE.md).
+// ---------------------------------------------------------------------------
+
+const MERGE_MODE_KEY = "__bioprospectingTableMergeMode";
+const MERGE_THRESHOLD_KEY = "__bioprospectingTableMergeThreshold";
+
+function resolveMergeMode(): MergeMode {
+  const cached = (globalThis as any)[MERGE_MODE_KEY] as MergeMode | undefined;
+  if (cached) return cached;
+  const raw = (
+    process.env[TABLE_MERGE_MODE_ENV] || "hard-confidence"
+  ).toLowerCase();
+  const mode: MergeMode =
+    raw === "hard" || raw === "hard-confidence" || raw === "manual"
+      ? (raw as MergeMode)
+      : "hard-confidence";
+  (globalThis as any)[MERGE_MODE_KEY] = mode;
+  return mode;
+}
+
+function resolveMergeThreshold(): number {
+  const cached = (globalThis as any)[MERGE_THRESHOLD_KEY] as
+    | number
+    | undefined;
+  if (typeof cached === "number") return cached;
+  const raw = process.env[TABLE_MERGE_THRESHOLD_ENV];
+  const n = raw ? Number(raw) : NaN;
+  const t = Number.isFinite(n) && n >= 0 && n <= 1 ? n : DEFAULT_MERGE_THRESHOLD;
+  (globalThis as any)[MERGE_THRESHOLD_KEY] = t;
+  return t;
+}
+
+/** Public accessors for the merge config. Memoized via `globalThis`
+ * so Bun workers do not hit TDZ on `process.env`. */
+export function getMergeMode(): MergeMode {
+  return resolveMergeMode();
+}
+
+export function getMergeThreshold(): number {
+  return resolveMergeThreshold();
+}
+
+/** Reset the memoized merge config. Test-only — forces the next
+ * `getMergeMode()` / `getMergeThreshold()` call to re-read `process.env`. */
+export function _resetMergeConfigForTests(): void {
+  delete (globalThis as any)[MERGE_MODE_KEY];
+  delete (globalThis as any)[MERGE_THRESHOLD_KEY];
+}
+
 // ---------------------------------------------------------------------------
 // pdfjs text-item shape (just the fields we use)
 // ---------------------------------------------------------------------------
@@ -120,7 +501,19 @@ export class LocalTableExtractionProvider implements TableExtractionProvider {
         page.cleanup();
       }
 
-      return tables;
+      // Post-pass: link multi-page table fragments via `continuesFromId`.
+      // Runs AFTER the per-page loop so it sees the full document. The
+      // override consult is a no-op at this layer (rows have no ids yet)
+      // — the orchestrator consults overrides post-INSERT in a follow-up
+      // pass. The env vars are read via `globalThis` memoization to
+      // avoid TDZ in Bun workers (see CLAUDE.md).
+      const merged = mergeTablesAcrossPages(
+        tables,
+        resolveMergeMode(),
+        [], // overrides consulted post-INSERT by the orchestrator
+        resolveMergeThreshold(),
+      );
+      return merged;
     } catch (error) {
       throw new TableExtractionProviderError(
         `pdfjs page extraction failed: ${(error as Error).message ?? String(error)}`,

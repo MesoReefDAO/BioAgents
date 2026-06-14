@@ -8,6 +8,10 @@
  * The route is also a deep-link target — the "Open in tab" button
  * in the lightbox navigates here with the resolved provenance
  * serialized in the URL hash, and the route restores it on mount.
+ *
+ * PR #2 of bioprospecting-multipage-table-merge: the sidebar
+ * table list now shows a "Part X of N" suffix on chain members,
+ * computed from the cached evidence via `useTableChain`.
  */
 import { useEffect } from "preact/hooks";
 import { route } from "preact-router";
@@ -15,6 +19,7 @@ import { route } from "preact-router";
 import { EvidenceViewer } from "../components/EvidenceViewer";
 import { usePdfDocument } from "../hooks/usePdfDocument";
 import { useSourceEvidence } from "../hooks/useSourceEvidence";
+import { useTableChain, computeTableChain } from "../hooks/useTableChain";
 import { parseViewerHash } from "../hooks/useProvenance";
 
 interface ViewerPageProps {
@@ -85,16 +90,32 @@ export function ViewerPage({ sourceId }: ViewerPageProps) {
             <section>
               <h4>Tables ({evidence.tables.length})</h4>
               <ul>
-                {evidence.tables.map((t) => (
-                  <li key={t.id}>
-                    <button
-                      type="button"
-                      onClick={() => goToPage(t.page).then(() => undefined)}
-                    >
-                      Page {t.page} · Table {t.tableIndex}
-                    </button>
-                  </li>
-                ))}
+                {evidence.tables.map((t) => {
+                  // PR #2: compute the chain this table belongs
+                  // to via the pure helper. We avoid a hook call
+                  // here (no React rules violation) by using
+                  // computeTableChain directly. The chain is in
+                  // page-ascending order; the current table's
+                  // index in the chain is the "Part X" position.
+                  // Single-fragment tables show no suffix.
+                  const chain = computeTableChain(evidence.tables, t.id);
+                  const chainIdx = chain.findIndex((f) => f.id === t.id);
+                  const partSuffix =
+                    chain.length > 1 && chainIdx >= 0
+                      ? ` · Part ${chainIdx + 1} of ${chain.length}`
+                      : "";
+                  return (
+                    <li key={t.id}>
+                      <button
+                        type="button"
+                        onClick={() => goToPage(t.page).then(() => undefined)}
+                      >
+                        Page {t.page} · Table {t.tableIndex}
+                        {partSuffix}
+                      </button>
+                    </li>
+                  );
+                })}
               </ul>
             </section>
           ) : null}

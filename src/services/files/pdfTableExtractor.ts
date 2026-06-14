@@ -539,12 +539,17 @@ export async function extractPDFTables(
     }
   }
 
-  // 3. Quality gate on the local output
+  // 3. Quality gate on the local output. PR #2: the gate counts
+  //    chain heads (rows with `continuesFromId === null` AND no
+  //    incoming FK) toward the `low_table_count` check, not the
+  //    raw fragment count. The raw count is still reported as
+  //    `tables` for logging.
   const gate = evaluateQualityGate(localTables);
   logger.info(
     {
       sourceId,
       reason: gate.reason,
+      chainHeads: gate.chainHeads,
       tables: gate.tables,
       avgConfidence: gate.avgConfidence,
       provider: "local",

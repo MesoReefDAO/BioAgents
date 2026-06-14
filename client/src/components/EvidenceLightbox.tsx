@@ -14,11 +14,13 @@
  * offsets. The text-only badge is rendered in the toolbar when
  * `provenance.type === "text-only"` (no overlay is drawn for it).
  */
-import { useCallback, useEffect, useRef } from "preact/hooks";
+import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 
 import { EvidenceViewer } from "./EvidenceViewer";
+import { ChainPager } from "./ChainPager";
 import { useProvenance, buildViewerHash, ProvenanceType } from "../hooks/useProvenance";
 import { usePdfDocument } from "../hooks/usePdfDocument";
+import { useSourceEvidence } from "../hooks/useSourceEvidence";
 import { BBox } from "../lib/bbox";
 
 interface EvidenceLightboxProps {
@@ -47,6 +49,32 @@ export function EvidenceLightbox({
   const sourceId = data?.sourceId ?? null;
   const { doc, isLoading: pdfLoading, error: pdfError, numPages } =
     usePdfDocument(isOpen && sourceId ? sourceId : null);
+
+  // PR #2 of bioprospecting-multipage-table-merge: the ChainPager
+  // walks `continuesFromId` on the cached evidence to render the
+  // "Part X of N" badge + prev/next. We fetch the full evidence
+  // for the source (the same endpoint the dedicated viewer uses)
+  // and pass the table list to the pager.
+  const { data: sourceEvidence } = useSourceEvidence(
+    isOpen && sourceId ? sourceId : null,
+  );
+  // Track the user-clicked page from the ChainPager (only fires
+  // when the `Follow` toggle is ON). When the pager requests a
+  // page navigation, we override the `page` prop passed to the
+  // EvidenceViewer below.
+  const navigatedPageRef = useRef<number | null>(null);
+  // No-op state to trigger re-render on navigation. The ref holds
+  // the actual page; the state is a one-bit "did the user click
+  // nav" flag that forces the parent component to re-evaluate.
+  const [, setChainTick] = useState(0);
+
+  // Handler for the ChainPager: when the user clicks prev/next
+  // AND the `Follow` toggle is ON, navigate to the fragment's
+  // page. The EvidenceViewer re-renders on the new page.
+  const handleChainNavigate = useCallback((targetPage: number) => {
+    navigatedPageRef.current = targetPage;
+    setChainTick((t) => t + 1);
+  }, []);
 
   // Remember the previously-focused element so we can restore on
   // close. The spec calls for "focus returns to the fact citation
@@ -125,8 +153,20 @@ export function EvidenceLightbox({
 
   const { provenance, sourceTitle } = data ?? {};
   const bbox: BBox | null = provenance?.bbox ?? null;
-  const page: number = bbox?.page ?? provenance?.chunk?.page ?? 1;
+  // PR #2: allow the ChainPager (when `Follow` is ON) to override
+  // the page. Default to the provenance's natural page on
+  // provenance / bbox changes; the pager only sets a new value on
+  // prev/next clicks.
+  const basePage: number = bbox?.page ?? provenance?.chunk?.page ?? 1;
+  const page: number = navigatedPageRef.current ?? basePage;
   const type: ProvenanceType = provenance?.type ?? "chunk";
+
+  // The current fact's table id (used by the ChainPager to find
+  // the chain). Null when the fact doesn't point at a table.
+  const currentTableId: string | null =
+    provenance?.type === "table" && provenance?.table?.id
+      ? provenance.table.id
+      : null;
 
   return (
     <div
@@ -189,6 +229,19 @@ export function EvidenceLightbox({
             ) : null}
           </div>
           <div className="evidence-lightbox__actions">
+            {/*
+              PR #2 of bioprospecting-multipage-table-merge:
+              render the "Part X of N" pager when the current
+              fact's table is part of a chain. The pager is hidden
+              when the chain has fewer than 2 fragments.
+            */}
+            {provenance?.type === "table" ? (
+              <ChainPager
+                tables={sourceEvidence?.tables ?? null}
+                currentTableId={currentTableId}
+                onNavigatePage={handleChainNavigate}
+              />
+            ) : null}
             <button
               ref={openInTabRef}
               type="button"

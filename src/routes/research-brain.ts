@@ -1078,6 +1078,10 @@ export const researchBrainRoute = new Elysia({ prefix: "/api/research-brain" })
             bbox: t.bbox,
             extractionProvider: t.extraction_provider,
             extractionConfidence: Number(t.extraction_confidence),
+            // PR #2 of bioprospecting-multipage-table-merge:
+            // surface `continues_from_id` so the viewer can walk
+            // the chain and render the "Part X of N" pager.
+            continuesFromId: t.continues_from_id ?? null,
           })),
           figures: figures.map((f) => ({
             id: f.id,

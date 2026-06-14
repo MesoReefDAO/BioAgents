@@ -1,10 +1,19 @@
 /**
  * Unit tests for the prompt builder.
+ *
+ * PR #2 of bioprospecting-multipage-table-merge: covers the
+ * chain walk, defensive merge, and cycle detection paths in
+ * `buildTablesPromptSection`. Each fixture hand-rolls
+ * `ExtractedTable[]` and asserts the rendered `tables:` block.
  */
 
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
 import type { ExtractedTable } from "../pdfTableExtractor";
-import { buildTablesPromptSection } from "../pdfTablePromptBuilder";
+import {
+  _resetTableMergeEnabledForTests,
+  buildTablesPromptSection,
+  isTableMergeEnabled,
+} from "../pdfTablePromptBuilder";
 
 function makeTable(overrides: Partial<ExtractedTable>): ExtractedTable {
   return {
@@ -121,5 +130,174 @@ describe("pdfTablePromptBuilder — buildTablesPromptSection", () => {
     ]);
     // No " | --- |" separator because there's no header row.
     expect(out).not.toContain("| --- |");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PR #2 of bioprospecting-multipage-table-merge: chain walk + defensive
+// merge + cycle detection.
+// ---------------------------------------------------------------------------
+
+describe("pdfTablePromptBuilder — PR2 chain walk", () => {
+  afterEach(() => {
+    _resetTableMergeEnabledForTests();
+  });
+
+  it("(a) chain walk: 3 fragments linked 5→6→7 via real DB ids collapse to 1 'tables:' block with 3 'page=N table=M' sub-markers in page-ascending order", () => {
+    // Fragments linked by real DB ids (post-INSERT case).
+    const head = makeTable({
+      id: "id-head",
+      page: 5,
+      tableIndex: 0,
+      headers: ["Treatment", "Yield"],
+      rows: [
+        ["A", "10"],
+        ["B", "20"],
+      ],
+    });
+    const mid = makeTable({
+      id: "id-mid",
+      page: 6,
+      tableIndex: 0,
+      headers: ["Treatment", "Yield"],
+      rows: [
+        ["C", "30"],
+        ["D", "40"],
+      ],
+      continuesFromId: "id-head",
+    });
+    const tail = makeTable({
+      id: "id-tail",
+      page: 7,
+      tableIndex: 0,
+      headers: ["Treatment", "Yield"],
+      rows: [
+        ["E", "50"],
+        ["F", "60"],
+      ],
+      continuesFromId: "id-mid",
+    });
+
+    const out = buildTablesPromptSection([mid, head, tail]);
+    // ONE `tables:` block.
+    expect(out.match(/^tables:$/gm)?.length).toBe(1);
+    // Three sub-markers in page-ascending order.
+    const p5 = out.indexOf("page=5 table=0");
+    const p6 = out.indexOf("page=6 table=0");
+    const p7 = out.indexOf("page=7 table=0");
+    expect(p5).toBeGreaterThan(-1);
+    expect(p6).toBeGreaterThan(-1);
+    expect(p7).toBeGreaterThan(-1);
+    expect(p5).toBeLessThan(p6);
+    expect(p6).toBeLessThan(p7);
+    // The bodies are concatenated in chain order.
+    const aIdx = out.indexOf("| A | 10 |");
+    const bIdx = out.indexOf("| B | 20 |");
+    const cIdx = out.indexOf("| C | 30 |");
+    const eIdx = out.indexOf("| E | 50 |");
+    expect(aIdx).toBeGreaterThan(-1);
+    expect(bIdx).toBeGreaterThan(aIdx);
+    expect(cIdx).toBeGreaterThan(bIdx);
+    expect(eIdx).toBeGreaterThan(cIdx);
+  });
+
+  it("(b) defensive merge: 2 unlinked fragments with matching headers on adjacent pages collapse to 1 block even when continuesFromId is null on both", () => {
+    // Two fragments, no FK set, but they match the `hard` heuristic
+    // (no `Table N.` prefix on T₂, identical headers).
+    const f1 = makeTable({
+      id: "f1",
+      page: 4,
+      tableIndex: 0,
+      headers: ["Treatment", "Yield"],
+      rows: [["A", "10"]],
+    });
+    const f2 = makeTable({
+      id: "f2",
+      page: 5,
+      tableIndex: 0,
+      headers: ["Treatment", "Yield"],
+      rows: [["B", "20"]],
+    });
+
+    const out = buildTablesPromptSection([f1, f2]);
+    // ONE `tables:` block (the defensive merge folded them).
+    expect(out.match(/^tables:$/gm)?.length).toBe(1);
+    // Two sub-markers in page order.
+    const p4 = out.indexOf("page=4 table=0");
+    const p5 = out.indexOf("page=5 table=0");
+    expect(p4).toBeGreaterThan(-1);
+    expect(p5).toBeGreaterThan(p4);
+  });
+
+  it("(c) cycle detection: a fragment with continuesFromId equal to its own id terminates cleanly without infinite loop", () => {
+    // Self-referential chain: row.id === row.continuesFromId.
+    // The walker must terminate, NOT spin forever.
+    const f1 = makeTable({
+      id: "self",
+      page: 1,
+      tableIndex: 0,
+      headers: ["A", "B"],
+      rows: [["1", "2"]],
+      continuesFromId: "self", // self-reference → cycle
+    });
+    const f2 = makeTable({
+      id: "f2",
+      page: 2,
+      tableIndex: 0,
+      headers: ["A", "B"],
+      rows: [["3", "4"]],
+    });
+
+    // The build must complete (no hang). We assert the result is
+    // well-formed: at least one `tables:` block, the self-ref row
+    // is treated as a head (because the cycle detection aborts
+    // the walk when it sees a repeat id).
+    const out = buildTablesPromptSection([f1, f2]);
+    expect(out.length).toBeGreaterThan(0);
+    expect(out.startsWith("tables:")).toBe(true);
+    // The self-ref fragment should still be present as a page=
+    // marker (because the cycle detection treats it as a head).
+    expect(out).toContain("page=1 table=0");
+    // f2 is unlinked → its own head, also rendered.
+    expect(out).toContain("page=2 table=0");
+  });
+
+  it("TABLE_MERGE_ENABLED=false falls back to per-fragment rendering", () => {
+    process.env.TABLE_MERGE_ENABLED = "false";
+    _resetTableMergeEnabledForTests();
+    expect(isTableMergeEnabled()).toBe(false);
+
+    const head = makeTable({
+      id: "id-head",
+      page: 5,
+      tableIndex: 0,
+      headers: ["Treatment", "Yield"],
+      rows: [["A", "10"]],
+    });
+    const mid = makeTable({
+      id: "id-mid",
+      page: 6,
+      tableIndex: 0,
+      headers: ["Treatment", "Yield"],
+      rows: [["B", "20"]],
+      continuesFromId: "id-head",
+    });
+
+    const out = buildTablesPromptSection([mid, head]);
+    // Kill switch off → per-fragment: two `tables:` blocks? No —
+    // there is still exactly one `tables:` header, but the chain
+    // walk is disabled so the head and tail are rendered in
+    // (page, tableIndex) order WITHOUT chain semantics. Verify
+    // both fragments appear and are ordered.
+    expect(out).toContain("page=5 table=0");
+    expect(out).toContain("page=6 table=0");
+    const p5 = out.indexOf("page=5 table=0");
+    const p6 = out.indexOf("page=6 table=0");
+    expect(p5).toBeLessThan(p6);
+
+    // Restore.
+    delete process.env.TABLE_MERGE_ENABLED;
+    _resetTableMergeEnabledForTests();
+    expect(isTableMergeEnabled()).toBe(true);
   });
 });

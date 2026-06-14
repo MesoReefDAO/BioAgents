@@ -19,6 +19,13 @@ export interface SourceEvidenceTable {
   bbox: BBox;
   extractionProvider: "local" | "mistral";
   extractionConfidence: number;
+  /**
+   * PR #2 of bioprospecting-multipage-table-merge: FK to the
+   * previous fragment in a multi-page chain. `null` = chain head.
+   * The viewer walks this field to render the "Part X of N"
+   * badge + pager.
+   */
+  continuesFromId?: string | null;
 }
 
 export interface SourceEvidenceFigure {

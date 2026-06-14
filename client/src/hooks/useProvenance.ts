@@ -39,11 +39,34 @@ export interface ProvenanceChunk {
   content: string;
 }
 
+export interface ProvenanceCompound {
+  canonicalName: string | null;
+  inchiKey: string | null;
+  pubchemCid: number | null;
+  molecularFormula: string | null;
+}
+
+export interface ProvenanceCompoundAuthority {
+  status: "pending" | "verified" | "failed" | "skipped" | null;
+  canonicalId: string | null;
+  at: string | null;
+  error: string | null;
+  attempts: number | null;
+}
+
 export interface ProvenanceResponse {
   factId: string;
   sourceId: string | null;
   sourceTitle: string;
   doi: string | null;
+  // PR #3 of bioprospecting-compound-authority — the resolved
+  // canonical compound (if any) and the authority state on the
+  // fact. The lightbox header shows InChIKey + PubChem CID from
+  // `compound.inchiKey` + `compound.pubchemCid` when the fact has
+  // a resolved canonical, and the badge variant from
+  // `compoundAuthority.status`.
+  compound: ProvenanceCompound | null;
+  compoundAuthority: ProvenanceCompoundAuthority;
   provenance: {
     type: ProvenanceType;
     table: ProvenanceTable | null;

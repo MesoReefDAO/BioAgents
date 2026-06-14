@@ -83,6 +83,13 @@ export interface BioAgentsJWTPayload {
 
   /** Audience - intended recipient (optional) */
   aud?: string | string[];
+
+  /**
+   * Role for the user. The `authResolver({ role: "admin" })` route
+   * guard reads this field and returns 403 when the role doesn't
+   * match. Optional because most tokens do not need a role.
+   */
+  role?: string;
 }
 
 /**

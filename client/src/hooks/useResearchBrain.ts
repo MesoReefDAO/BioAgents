@@ -90,6 +90,24 @@ export interface ResearchBrainBioprospectingFact {
   applicationArea?: string | null;
   assayModel?: string | null;
   resultSummary?: string | null;
+  // PR #3 of bioprospecting-compound-authority — canonical
+  // resolution state for the compound. The fields are populated
+  // server-side by the worker / editor flow. The client uses them
+  // to render the CompoundAuthorityBadge and to enrich the
+  // provenance lightbox.
+  compoundCanonicalId?: string | null;
+  compoundAuthorityStatus?: "pending" | "verified" | "failed" | "skipped" | null;
+  compoundAuthorityAt?: string | null;
+  compoundAuthorityError?: string | null;
+  compoundAuthorityAttempts?: number | null;
+  // Convenience fields that the search response can hydrate via
+  // a left-join on `research_compounds`. Optional — when the
+  // canonical id is set, the server may return the display name +
+  // InChIKey + PubChem CID in the row. The badge uses these to
+  // avoid a second round-trip.
+  compoundCanonicalName?: string | null;
+  compoundInchiKey?: string | null;
+  compoundPubchemCid?: number | null;
   measurementValue?: number | null;
   measurementUnit?: string | null;
   measurementDirection?: string | null;

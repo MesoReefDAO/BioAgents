@@ -79,7 +79,7 @@ async function processExtractionJob(job: Job<BioprospectingJobData, any>): Promi
       // Estimate ~500 tokens input + ~800 tokens output per extraction (typical for this task)
       const inputTokens = 500;
       const outputTokens = 800;
-      const costUsd = calculateCost(providerName, model, inputTokens, outputTokens);
+      const { costUsd } = calculateCost(providerName, model, inputTokens, outputTokens);
       await recordLlmCall(runId, {
         provider: providerName,
         model,

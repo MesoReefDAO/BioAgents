@@ -3,8 +3,14 @@
  *
  * Provides:
  * - Provider pricing map (OpenAI, Anthropic, Google, OpenRouter)
- * - calculateCost() to compute USD cost from token counts
+ * - calculateCost() to compute USD cost from token counts (LLMs)
+ *   or units (external providers like mistral-ocr / pubchem)
  * - recordLlmCall() to persist a call record via Supabase RPC
+ *
+ * The `calculateCost` return shape is `{ costUsd, units }` so it can
+ * serve both LLM providers (units = tokens) and external API
+ * providers (units = pages, requests, etc.) that participate in the
+ * `api-cost-guard-rails` cost-cap infrastructure.
  */
 
 import { getServiceClient } from "../../db/client";
@@ -36,6 +42,22 @@ const LLM_PRICING: Record<string, { inputPer1M: number; outputPer1M: number }> =
   "openrouter/claude-3-haiku": { inputPer1M: 0.25, outputPer1M: 1.25 },
 };
 
+// External API providers tracked under api-cost-guard-rails. The
+// pricing for these is per-unit (pages for mistral-ocr; requests for
+// pubchem, which is free in dollars but rate-limited).
+const EXTERNAL_PROVIDER_PRICING: Record<
+  string,
+  { costPerUnit: number; unitsLabel: string }
+> = {
+  // mistral-ocr: $0.05 per page by default; overridable via
+  // MISTRAL_OCR_COST_PER_PAGE_USD at call time (calculateCost reads
+  // process.env on every call to match the env-driven cap model).
+  "mistral-ocr": { costPerUnit: 0.05, unitsLabel: "pages" },
+  // pubchem: free, but we still track the unit count for the
+  // PUBCHEM_DAILY_REQUEST_CAP enforcement.
+  pubchem: { costPerUnit: 0, unitsLabel: "requests" },
+};
+
 export interface LlmCallEntry {
   provider: string;
   model: string;
@@ -47,25 +69,72 @@ export interface LlmCallEntry {
 }
 
 /**
- * Calculate USD cost for an LLM call
+ * Result of a cost calculation. Always carries both `costUsd` and
+ * `units` so the same shape works for LLM token-based billing
+ * (units = tokens) and external API unit-based billing (units =
+ * pages, requests, etc.).
+ */
+export interface CostResult {
+  costUsd: number;
+  units: number;
+}
+
+/**
+ * Calculate USD cost for a call. Supports:
+ *   - LLM providers (e.g. "openai/gpt-4o"): costUsd derived from
+ *     input/output token counts against the LLM_PRICING table.
+ *   - External API providers ("mistral-ocr", "pubchem"): costUsd
+ *     derived from `units` against the EXTERNAL_PROVIDER_PRICING
+ *     table. Pubchem is always $0; mistral-ocr defaults to $0.05
+ *     per page and is overridable via
+ *     MISTRAL_OCR_COST_PER_PAGE_USD.
+ *
+ * The function never throws on unknown providers; it returns
+ * `{ costUsd: 0, units: <passthrough> }` and logs a WARN.
  */
 export function calculateCost(
   provider: string,
   model: string,
   inputTokens: number,
   outputTokens: number,
-): number {
+  // Optional external-API unit count. For LLM calls this is
+  // ignored and the token-based cost is returned. For external
+  // providers (mistral-ocr, pubchem) this is the authoritative
+  // unit count.
+  externalUnits?: number,
+): CostResult {
+  // External API providers (mistral-ocr, pubchem).
+  const external = EXTERNAL_PROVIDER_PRICING[provider];
+  if (external) {
+    const units = externalUnits ?? 0;
+    if (provider === "mistral-ocr") {
+      const raw = process.env.MISTRAL_OCR_COST_PER_PAGE_USD;
+      const costPerPage = raw != null && raw !== "" && !Number.isNaN(Number(raw))
+        ? Number(raw)
+        : external.costPerUnit;
+      const costUsd = Math.round(units * costPerPage * 1_000_000) / 1_000_000;
+      return { costUsd, units };
+    }
+    // pubchem (and any future free-but-capped external provider).
+    return { costUsd: 0, units };
+  }
+
+  // LLM providers: token-based pricing.
   const key = `${provider}/${model}`;
   const pricing = LLM_PRICING[key] ?? LLM_PRICING[model];
 
   if (!pricing) {
     logger.warn({ provider, model }, "llm_cost_unknown_pricing");
-    return 0;
+    // For LLM calls the "units" is the sum of input + output tokens
+    // — surfaces the volume even when pricing is unknown.
+    return { costUsd: 0, units: inputTokens + outputTokens };
   }
 
   const inputCost = (inputTokens / 1_000_000) * pricing.inputPer1M;
   const outputCost = (outputTokens / 1_000_000) * pricing.outputPer1M;
-  return Math.round((inputCost + outputCost) * 1_000_000) / 1_000_000; // 6 decimal places
+  const costUsd =
+    Math.round((inputCost + outputCost) * 1_000_000) / 1_000_000;
+  return { costUsd, units: inputTokens + outputTokens };
 }
 
 /**

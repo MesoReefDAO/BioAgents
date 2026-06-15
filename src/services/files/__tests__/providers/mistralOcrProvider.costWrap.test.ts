@@ -174,6 +174,14 @@ beforeEach(() => {
   setRecordApiCall(undefined);
   process.env.MISTRAL_API_KEY = "test-key";
   delete process.env.MISTRAL_OCR_ENABLED;
+  // PR #1 of figure-image-extraction: clear the
+  // `include_image_base64` cache so each test re-reads the env.
+  delete process.env.MISTRAL_OCR_INCLUDE_IMAGE_BASE64;
+  delete (globalThis as any).__bioprospectingMistralIncludeImageBase64;
+  // Clear the per-source figure bytes store so the cache doesn't
+  // leak between tests. Each test sets its own response body; the
+  // cache MUST reflect only the bytes the response just emitted.
+  delete (globalThis as any).__bioprospectingMistralFigureBytes;
   // Clear the TDZ-safe provider-enabled cache so each test re-reads
   // the env from scratch. Otherwise, switching MISTRAL_OCR_ENABLED
   // mid-suite has no effect.
@@ -186,7 +194,10 @@ afterEach(() => {
   setCheckCap(undefined);
   setRecordApiCall(undefined);
   delete process.env.MISTRAL_OCR_API_KEY;
+  delete process.env.MISTRAL_OCR_INCLUDE_IMAGE_BASE64;
   delete (globalThis as any).__mistralOcrEnabled__;
+  delete (globalThis as any).__bioprospectingMistralIncludeImageBase64;
+  delete (globalThis as any).__bioprospectingMistralFigureBytes;
   (globalThis as any).fetch = realFetch;
 });
 
@@ -504,5 +515,215 @@ describe("MistralTableExtractionProvider — RPC soft-fail (defense in depth)", 
       sourceId: SOURCE_ID,
     });
     expect(tables.length).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// (6) PR #1 of figure-image-extraction: `include_image_base64` flag flip
+// ---------------------------------------------------------------------------
+
+describe("MistralTableExtractionProvider — include_image_base64 flag (PR #1 figure-image-extraction)", () => {
+  it("MISTRAL_OCR_INCLUDE_IMAGE_BASE64=true (default) sends include_image_base64: true in the fetch body", async () => {
+    setCheckCap(async () => ({
+      allowed: true,
+      wouldHitDaily: false,
+      wouldHitMonthly: false,
+      wouldHitPerSource: false,
+      wouldHitPerRun: false,
+    }));
+    setRecordApiCall(async () => ({
+      capHit: null,
+      currentDailyCost: 0,
+      currentMonthlyCost: 0,
+      currentSourceCost: 0,
+      currentRunCost: 0,
+    }));
+    // Default state: env var unset → default true.
+    delete process.env.MISTRAL_OCR_INCLUDE_IMAGE_BASE64;
+    delete (globalThis as any).__bioprospectingMistralIncludeImageBase64;
+
+    const provider = new MistralTableExtractionProvider({ apiKey: "test-key" });
+    await provider.extract(makePdf(), { runId: RUN_ID, sourceId: SOURCE_ID });
+
+    expect(fetchCalls.length).toBe(1);
+    const body = JSON.parse((fetchCalls[0].init as any).body);
+    expect(body.include_image_base64).toBe(true);
+  });
+
+  it("MISTRAL_OCR_INCLUDE_IMAGE_BASE64=false sends include_image_base64: false in the fetch body", async () => {
+    setCheckCap(async () => ({
+      allowed: true,
+      wouldHitDaily: false,
+      wouldHitMonthly: false,
+      wouldHitPerSource: false,
+      wouldHitPerRun: false,
+    }));
+    setRecordApiCall(async () => ({
+      capHit: null,
+      currentDailyCost: 0,
+      currentMonthlyCost: 0,
+      currentSourceCost: 0,
+      currentRunCost: 0,
+    }));
+    process.env.MISTRAL_OCR_INCLUDE_IMAGE_BASE64 = "false";
+    delete (globalThis as any).__bioprospectingMistralIncludeImageBase64;
+
+    const provider = new MistralTableExtractionProvider({ apiKey: "test-key" });
+    await provider.extract(makePdf(), { runId: RUN_ID, sourceId: SOURCE_ID });
+
+    expect(fetchCalls.length).toBe(1);
+    const body = JSON.parse((fetchCalls[0].init as any).body);
+    expect(body.include_image_base64).toBe(false);
+
+    // The provider's parsed figures have bytes: null when the flag
+    // is off (we re-run extractFigures with no image_base64 in
+    // the response and assert the cache stays empty).
+    const SUT = await import("../../providers/mistralOcrProvider");
+    fetchResponse = {
+      ok: true,
+      status: 200,
+      body: JSON.stringify({
+        pages: [
+          {
+            index: 0,
+            markdown: "page text",
+            images: [
+              { bbox: { x: 0, y: 0, w: 100, h: 50 }, caption: "fig" },
+            ],
+          },
+        ],
+      }),
+    };
+    const figures = await provider.extractFigures(makePdf(), {
+      runId: RUN_ID,
+      sourceId: SOURCE_ID,
+    });
+    expect(figures.length).toBe(1);
+    expect(figures[0].caption).toBe("fig");
+
+    // The Mistral bytes cache should NOT have been populated.
+    const cached = SUT.consumeMistralFigureBytes(SOURCE_ID);
+    expect(cached.size).toBe(0);
+  });
+
+  it("threads image_bytes_total and image_count into recordApiCall metadata when images are present", async () => {
+    setCheckCap(async () => ({
+      allowed: true,
+      wouldHitDaily: false,
+      wouldHitMonthly: false,
+      wouldHitPerSource: false,
+      wouldHitPerRun: false,
+    }));
+    let recorded: any = null;
+    setRecordApiCall(async (input: any) => {
+      recorded = input;
+      return {
+        capHit: null,
+        currentDailyCost: 0,
+        currentMonthlyCost: 0,
+        currentSourceCost: 0,
+        currentRunCost: 0,
+      };
+    });
+    delete process.env.MISTRAL_OCR_INCLUDE_IMAGE_BASE64;
+    delete (globalThis as any).__bioprospectingMistralIncludeImageBase64;
+
+    // Response with 2 images: 1 small (3 bytes), 1 large (5 bytes).
+    // The base64 payloads decode to those exact byte counts.
+    fetchResponse = {
+      ok: true,
+      status: 200,
+      body: JSON.stringify({
+        pages: [
+          {
+            index: 0,
+            markdown: "page",
+            tables: [
+              {
+                headers: ["A"],
+                rows: [["x"]],
+                bbox: { x: 0, y: 0, w: 100, h: 50 },
+                confidence: 0.8,
+              },
+            ],
+            images: [
+              {
+                bbox: { x: 0, y: 0, w: 100, h: 50 },
+                caption: "img1",
+                image_base64: Buffer.from([1, 2, 3]).toString("base64"),
+              },
+              {
+                bbox: { x: 0, y: 0, w: 100, h: 50 },
+                caption: "img2",
+                image_base64: Buffer.from([4, 5, 6, 7, 8]).toString("base64"),
+              },
+            ],
+          },
+        ],
+      }),
+    };
+
+    const provider = new MistralTableExtractionProvider({ apiKey: "test-key" });
+    await provider.extract(makePdf(), { runId: RUN_ID, sourceId: SOURCE_ID });
+
+    expect(recorded).not.toBeNull();
+    expect(recorded.metadata).toBeDefined();
+    expect(recorded.metadata.image_count).toBe(2);
+    expect(recorded.metadata.image_bytes_total).toBe(8); // 3 + 5
+  });
+
+  it("MISTRAL_OCR_INCLUDE_IMAGE_BASE64=true populates the per-source bytes cache via extractFigures", async () => {
+    setCheckCap(async () => ({
+      allowed: true,
+      wouldHitDaily: false,
+      wouldHitMonthly: false,
+      wouldHitPerSource: false,
+      wouldHitPerRun: false,
+    }));
+    setRecordApiCall(async () => ({
+      capHit: null,
+      currentDailyCost: 0,
+      currentMonthlyCost: 0,
+      currentSourceCost: 0,
+      currentRunCost: 0,
+    }));
+    delete process.env.MISTRAL_OCR_INCLUDE_IMAGE_BASE64;
+    delete (globalThis as any).__bioprospectingMistralIncludeImageBase64;
+
+    // The Mistral response carries 1 image on page 1 with 5 bytes of payload.
+    fetchResponse = {
+      ok: true,
+      status: 200,
+      body: JSON.stringify({
+        pages: [
+          {
+            index: 0,
+            markdown: "page",
+            images: [
+              {
+                bbox: { x: 0, y: 0, w: 100, h: 50 },
+                caption: "fig",
+                image_base64: Buffer.from([10, 20, 30, 40, 50]).toString("base64"),
+              },
+            ],
+          },
+        ],
+      }),
+    };
+
+    const SUT = await import("../../providers/mistralOcrProvider");
+    const provider = new MistralTableExtractionProvider({ apiKey: "test-key" });
+    const figures = await provider.extractFigures(makePdf(), {
+      runId: RUN_ID,
+      sourceId: SOURCE_ID,
+    });
+    expect(figures.length).toBe(1);
+
+    // Cache should hold the decoded bytes keyed by "1:0".
+    const cached = SUT.consumeMistralFigureBytes(SOURCE_ID);
+    expect(cached.size).toBe(1);
+    const key = cached.keys().next().value as string;
+    expect(key).toBe("1:0");
+    expect(Array.from(cached.get(key)!)).toEqual([10, 20, 30, 40, 50]);
   });
 });

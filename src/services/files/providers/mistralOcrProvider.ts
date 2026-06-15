@@ -13,10 +13,11 @@
  * Request:
  *   { model: "mistral-ocr-latest", document: { type: "document_url",
  *     document_url: "<data:application/pdf;base64,...>" },
- *     include_image_base64: false }
+ *     include_image_base64: <flag> }
  *
  * Response (paraphrased):
- *   { pages: [{ index, markdown, tables?: [...], images?: [{ bbox, caption }] }] }
+ *   { pages: [{ index, markdown, tables?: [...], images?: [{ bbox,
+ *     caption, image_base64? }] }] }
  *
  * Strategy:
  *   - If Mistral returns structured `pages[i].tables`, use them and
@@ -28,6 +29,13 @@
  *     resolution. We divide by `DPI/72` to convert to PDF points.
  *   - Per-row confidence defaults to 0.5 when Mistral does not
  *     provide a per-block confidence (per the spec).
+ *
+ * PR #1 of figure-image-extraction: `include_image_base64` is
+ * gated on `MISTRAL_OCR_INCLUDE_IMAGE_BASE64` (default `true`).
+ * The base64 payload is decoded and surfaced to the
+ * `figureImageExtractor` orchestrator via
+ * `consumeMistralFigureBytes(sourceId)`. The orchestrator
+ * drains the cache to avoid leaking bytes across sources.
  */
 
 import type {
@@ -96,12 +104,91 @@ type MistralResponsePage = {
   images?: Array<{
     bbox?: { x: number; y: number; w: number; h: number };
     caption?: string;
+    /**
+     * PR #1 of figure-image-extraction: base64-encoded image bytes
+     * returned by Mistral when `include_image_base64=true`. The
+     * Mistral OCR API may emit a `data:` URL prefix (e.g.
+     * `data:image/png;base64,...`) OR a raw b64 string. The
+     * decoder in this provider tolerates both forms. */
+    image_base64?: string;
   }>;
 };
 
 type MistralResponse = {
   pages?: MistralResponsePage[];
 };
+
+/**
+ * Per-source cache of decoded figure image bytes. Keyed by sourceId
+ * (so concurrent sources don't clobber each other); within a source
+ * the per-figure key is `${page}:${figureIndex}` (1-indexed page,
+ * 0-based figureIndex on the page).
+ *
+ * The cache is filled by `extractFigures` and drained by the
+ * orchestrator via `consumeMistralFigureBytes(sourceId)`. The
+ * drain pattern is intentional: once the orchestrator has
+ * persisted the bytes, the cache is no longer needed and a stale
+ * entry from a prior run would only confuse debugging.
+ *
+ * `globalThis` memoization avoids TDZ in Bun workers (see
+ * CLAUDE.md).
+ */
+type MistralFigureBytesMap = Map<string, Uint8Array>;
+
+const MISTRAL_FIGURE_BYTES_KEY = "__bioprospectingMistralFigureBytes";
+
+interface MistralFigureBytesStore {
+  bySource: Map<string, MistralFigureBytesMap>;
+}
+
+function getFigureBytesStore(): MistralFigureBytesStore {
+  let s = (globalThis as any)[MISTRAL_FIGURE_BYTES_KEY] as
+    | MistralFigureBytesStore
+    | undefined;
+  if (!s) {
+    s = { bySource: new Map() };
+    (globalThis as any)[MISTRAL_FIGURE_BYTES_KEY] = s;
+  }
+  return s;
+}
+
+/**
+ * Drain the figure bytes for a source. The orchestrator calls this
+ * exactly once per source. The map is deleted from the store
+ * (drain semantics) so subsequent calls return an empty map.
+ */
+export function consumeMistralFigureBytes(
+  sourceId: string,
+): MistralFigureBytesMap {
+  const store = getFigureBytesStore();
+  const m = store.bySource.get(sourceId);
+  if (!m) return new Map();
+  store.bySource.delete(sourceId);
+  return m;
+}
+
+/**
+ * TDZ-safe env resolution for the `include_image_base64` flag.
+ * Default `true` (PR #1 of figure-image-extraction).
+ */
+const MISTRAL_INCLUDE_B64_KEY = "__bioprospectingMistralIncludeImageBase64";
+
+function resolveIncludeImageBase64(): boolean {
+  const cached = (globalThis as any)[MISTRAL_INCLUDE_B64_KEY] as
+    | boolean
+    | undefined;
+  if (typeof cached === "boolean") return cached;
+  const raw = process.env.MISTRAL_OCR_INCLUDE_IMAGE_BASE64;
+  // Default true unless explicitly set to "false" or "0".
+  const enabled = raw == null || raw === "" ? true : raw.toLowerCase() !== "false" && raw !== "0";
+  (globalThis as any)[MISTRAL_INCLUDE_B64_KEY] = enabled;
+  return enabled;
+}
+
+/** Test-only hook to force a re-read of the env var. */
+export function _resetMistralIncludeImageBase64ForTests(): void {
+  delete (globalThis as any)[MISTRAL_INCLUDE_B64_KEY];
+}
 
 export class MistralTableExtractionProvider implements TableExtractionProvider {
   readonly name = "mistral" as const;
@@ -218,12 +305,47 @@ export class MistralTableExtractionProvider implements TableExtractionProvider {
     const pixelToPt = PDFJS_PT_PER_INCH / this.dpi;
     const out: ExtractedFigure[] = [];
     const pages = response.pages || [];
+    const includeB64 = resolveIncludeImageBase64();
+
+    // Per-source figure bytes cache. The orchestrator drains this
+    // via `consumeMistralFigureBytes(sourceId)` after `extractPDFTables`
+    // returns.
+    const figureBytes: MistralFigureBytesMap = new Map();
+
     for (const page of pages) {
       const pageNum = (page.index ?? 0) + 1;
       const images = page.images || [];
       for (let i = 0; i < images.length; i++) {
         const img = images[i];
         if (!img.bbox) continue;
+
+        // Decode base64 when the flag is on. The decoder tolerates
+        // both standard and URL-safe alphabets; decode failures
+        // are WARN-logged and treated as "no image for this
+        // figure" (the render-crop path gets a chance).
+        let decodedBytes: Uint8Array | null = null;
+        if (includeB64 && typeof img.image_base64 === "string" && img.image_base64.length > 0) {
+          try {
+            decodedBytes = decodeBase64Flexible(img.image_base64);
+          } catch (err) {
+            logger.warn(
+              {
+                err,
+                event: "mistral_image_base64_decode_failed",
+                sourceId: ctx?.sourceId,
+                page: pageNum,
+                figureIndex: i,
+              },
+              "Mistral image_base64 decode failed; falling through to render-crop",
+            );
+            decodedBytes = null;
+          }
+        }
+
+        if (decodedBytes && decodedBytes.byteLength > 0) {
+          figureBytes.set(`${pageNum}:${i}`, decodedBytes);
+        }
+
         out.push({
           page: pageNum,
           figureIndex: i,
@@ -239,6 +361,14 @@ export class MistralTableExtractionProvider implements TableExtractionProvider {
         });
       }
     }
+
+    // Persist the bytes to the process-local store, keyed by
+    // sourceId. The orchestrator consumes (drains) this.
+    if (figureBytes.size > 0 && ctx?.sourceId) {
+      const store = getFigureBytesStore();
+      store.bySource.set(ctx.sourceId, figureBytes);
+    }
+
     return out;
   }
 
@@ -300,12 +430,46 @@ export class MistralTableExtractionProvider implements TableExtractionProvider {
     const actualUnits = response.pages?.length ?? 0;
     const actualCostUsd =
       actualUnits * MistralTableExtractionProvider.costPerPageUsd();
+
+    // PR #1 of figure-image-extraction: thread the parsed image
+    // base64 byte total + image count into the `recordApiCall`
+    // metadata. The orchestrator consumes the bytes via
+    // `consumeMistralFigureBytes`; we calculate the total here
+    // for the metadata block. When `MISTRAL_OCR_INCLUDE_IMAGE_BASE64`
+    // is false, the totals are 0.
+    let imageBytesTotal = 0;
+    let imageCount = 0;
+    if (resolveIncludeImageBase64()) {
+      for (const page of response.pages || []) {
+        const images = page.images || [];
+        for (const img of images) {
+          if (typeof img.image_base64 === "string" && img.image_base64.length > 0) {
+            try {
+              const decoded = decodeBase64Flexible(img.image_base64);
+              imageBytesTotal += decoded.byteLength;
+              imageCount++;
+            } catch {
+              // Skip decode failures here — the orchestrator's
+              // own decode pass is the authoritative one.
+            }
+          }
+        }
+      }
+    }
+
     const post = await recordApiCall({
       provider: MISTRAL_PROVIDER,
       units: actualUnits,
       costUsd: actualCostUsd,
       sourceId: ctx?.sourceId,
       runId: ctx?.runId,
+      metadata:
+        imageCount > 0
+          ? {
+              image_bytes_total: imageBytesTotal,
+              image_count: imageCount,
+            }
+          : undefined,
     });
     if (post.capHit) {
       logger.warn(
@@ -342,6 +506,12 @@ export class MistralTableExtractionProvider implements TableExtractionProvider {
     const base64 = bytesToBase64(pdf);
     const documentUrl = `data:application/pdf;base64,${base64}`;
 
+    // PR #1 of figure-image-extraction: gate `include_image_base64`
+    // on the env var. Default `true`. When false, the request body
+    // restores pre-change behavior (no image base64 in the
+    // response, no Mistral raster path).
+    const includeB64 = resolveIncludeImageBase64();
+
     let response: Response;
     try {
       response = await fetch(MISTRAL_OCR_URL, {
@@ -356,7 +526,7 @@ export class MistralTableExtractionProvider implements TableExtractionProvider {
             type: "document_url",
             document_url: documentUrl,
           },
-          include_image_base64: false,
+          include_image_base64: includeB64,
         }),
       });
     } catch (error) {
@@ -449,4 +619,36 @@ function bytesToBase64(bytes: Uint8Array): string {
     out += "=";
   }
   return out;
+}
+
+/**
+ * Decode a base64 string tolerating both standard and URL-safe
+ * alphabets. Mistral OCR may emit either form depending on the
+ * payload path. We strip a `data:<mime>;base64,` prefix if
+ * present, replace URL-safe chars (`-` and `_`) with their
+ * standard equivalents, and decode via `Buffer.from(b64, 'base64')`
+ * (which ignores padding).
+ */
+function decodeBase64Flexible(input: string): Uint8Array {
+  let s = input.trim();
+  // Strip data: URL prefix if present
+  const dataPrefix = /^data:[^;]+;base64,/i;
+  if (dataPrefix.test(s)) {
+    s = s.replace(dataPrefix, "");
+  }
+  // URL-safe → standard alphabet
+  s = s.replace(/-/g, "+").replace(/_/g, "/");
+  // Strip whitespace
+  s = s.replace(/\s+/g, "");
+  if (s.length === 0) {
+    throw new Error("empty base64 payload");
+  }
+  // Buffer.from with 'base64' encoding is permissive about
+  // padding (it ignores missing '=' chars at the end) and
+  // ignores invalid chars. This matches the spec's tolerance.
+  const buf = Buffer.from(s, "base64");
+  if (buf.length === 0) {
+    throw new Error("base64 decode produced empty buffer");
+  }
+  return new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
 }

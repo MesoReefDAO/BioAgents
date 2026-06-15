@@ -35,6 +35,10 @@ import {
   loadTablesForSource,
 } from "../services/files/pdfTableExtractor";
 import { getStorageProvider } from "../storage";
+import {
+  downloadFigure,
+  FigureNotFoundError,
+} from "../storage/figureStorage";
 import logger from "../utils/logger";
 
 function getDocsPath(): string {
@@ -1096,13 +1100,31 @@ export const researchBrainRoute = new Elysia({ prefix: "/api/research-brain" })
             // the chain and render the "Part X of N" pager.
             continuesFromId: t.continues_from_id ?? null,
           })),
-          figures: figures.map((f) => ({
-            id: f.id,
-            page: f.page,
-            figureIndex: f.figure_index,
-            bbox: f.bbox,
-            caption: f.caption,
-          })),
+          figures: figures.map((f) => {
+            // PR #1 of figure-image-extraction: surface the
+            // image fields when the figure has an extracted
+            // image (`storage_path IS NOT NULL`). When the
+            // figure is bbox-only, the four new fields are
+            // omitted (the spec's contract — the viewer treats
+            // the absence of `imageUrl` as the bbox-only case).
+            const base = {
+              id: f.id,
+              page: f.page,
+              figureIndex: f.figure_index,
+              bbox: f.bbox,
+              caption: f.caption,
+            };
+            if (f.storage_path) {
+              return {
+                ...base,
+                imageUrl: `/api/research-brain/figures/${f.id}/image`,
+                width: f.width ?? null,
+                height: f.height ?? null,
+                mimeType: f.mime_type ?? null,
+              };
+            }
+            return base;
+          }),
           chunks,
         };
       } catch (error: any) {
@@ -1214,6 +1236,136 @@ export const researchBrainRoute = new Elysia({ prefix: "/api/research-brain" })
         set.status = 502;
         return {
           error: "Failed to proxy source PDF",
+          message: error?.message,
+        };
+      }
+    },
+    { beforeHandle: authResolver({ required: true }) },
+  )
+  .get(
+    // PR #1 of figure-image-extraction: image proxy for extracted
+    // figure bytes. Same auth + size-cap pattern as the PDF proxy.
+    // Spec: 401 unauthed, 404 on storage_path IS NULL, 413 on
+    // > 50 MB, 502 on storage unconfigured, 200 with image bytes
+    // and the documented headers.
+    "/figures/:figureId/image",
+    async ({ params, set }) => {
+      const { figureId } = params;
+      if (!figureId) {
+        set.status = 400;
+        return { error: "Missing figureId" };
+      }
+
+      // 50 MB cap — matches the PDF proxy's MAX_PDF_BYTES policy.
+      const MAX_FIGURE_BYTES = 50 * 1024 * 1024;
+
+      try {
+        // 1. Storage provider check.
+        const storage = getStorageProvider();
+        if (!storage) {
+          set.status = 502;
+          return {
+            error: "Storage not configured",
+            message:
+              "STORAGE_PROVIDER is unset; the figure image proxy is unavailable in this environment.",
+          };
+        }
+
+        // 2. Load the figure row. The `select` includes the 5
+        //    new image columns. We do a single-row lookup by id;
+        //    the existing `loadFiguresForSource` reads per-source
+        //    so it does not match the per-figure lookup.
+        const sb = getServiceClient();
+        const { data: figureRow, error: rowErr } = await sb
+          .from("research_evidence_figures")
+          .select(
+            "id, source_id, page, figure_index, storage_path, mime_type, byte_size",
+          )
+          .eq("id", figureId)
+          .maybeSingle();
+        if (rowErr) {
+          logger.warn(
+            { err: rowErr, figureId },
+            "research_brain_figure_image_lookup_failed",
+          );
+          set.status = 500;
+          return {
+            error: "Failed to lookup figure",
+            message: rowErr.message,
+          };
+        }
+        if (!figureRow) {
+          set.status = 404;
+          return { error: "Figure not found" };
+        }
+        const storagePath = (figureRow as any).storage_path as
+          | string
+          | null
+          | undefined;
+        if (!storagePath) {
+          set.status = 404;
+          return { error: "Figure has no extracted image" };
+        }
+        const mimeType = ((figureRow as any).mime_type as string) || "image/png";
+        const declaredByteSize = (figureRow as any).byte_size as number | null;
+        if (
+          typeof declaredByteSize === "number" &&
+          declaredByteSize > MAX_FIGURE_BYTES
+        ) {
+          set.status = 413;
+          return {
+            error: "Image exceeds 50 MB cap",
+            bytes: declaredByteSize,
+          };
+        }
+
+        // 3. Download from S3 via the figureStorage helper. The
+        //    helper throws `FigureNotFoundError` on a 404.
+        let bytes: Uint8Array;
+        try {
+          bytes = await downloadFigure(storagePath);
+        } catch (err) {
+          if (err instanceof FigureNotFoundError) {
+            set.status = 404;
+            return { error: "Figure image not found in storage" };
+          }
+          throw err;
+        }
+
+        // 4. Re-check the actual size after download (defense in
+        //    depth — the declared byte_size could be stale).
+        if (bytes.byteLength > MAX_FIGURE_BYTES) {
+          set.status = 413;
+          return {
+            error: "Image exceeds 50 MB cap",
+            bytes: bytes.byteLength,
+          };
+        }
+
+        // 5. Compute the file extension for Content-Disposition.
+        const ext = mimeType === "image/jpeg" ? "jpg" : "png";
+        const figureIndex = (figureRow as any).figure_index ?? 0;
+        const safeIndex = String(figureIndex).replace(/[^\w-]/g, "_");
+        const filename = `figure-${safeIndex}.${ext}`;
+
+        const headers: Record<string, string> = {
+          "Content-Type": mimeType,
+          "Content-Length": String(bytes.byteLength),
+          "Content-Disposition": `inline; filename="${filename}"`,
+          "Cache-Control": "private, max-age=300",
+        };
+        return new Response(
+          new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength),
+          { status: 200, headers },
+        );
+      } catch (error: any) {
+        logger.error(
+          { err: error, figureId },
+          "research_brain_figure_image_failed",
+        );
+        set.status = 502;
+        return {
+          error: "Failed to proxy figure image",
           message: error?.message,
         };
       }

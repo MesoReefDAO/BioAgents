@@ -99,6 +99,23 @@ export interface ExtractedFigure {
   figureIndex: number;
   bbox: BBox;
   caption: string | null;
+  /**
+   * Extracted image bytes (Mistral raster or render-crop path).
+   * `null` in the local provider's output (v1 is bbox-only for
+   * the local detector). The figure-image-extraction orchestrator
+   * populates this downstream of `persistExtractedFigures`. See
+   * `figure-image-extraction` capability, `Figure Image Extractor
+   * Service` requirement.
+   */
+  bytes?: Uint8Array | null;
+  /** Output format. Mirrors `figureStorage.FigureFormat`. */
+  format?: "png" | "jpeg" | null;
+  /** Pixel width of the encoded image. */
+  width?: number | null;
+  /** Pixel height of the encoded image. */
+  height?: number | null;
+  /** Total bytes of the encoded image. */
+  byteSize?: number | null;
 }
 
 /**
@@ -159,6 +176,20 @@ export type ResearchEvidenceFigureRow = {
   figure_index: number;
   bbox: BBox;
   caption: string | null;
+  /**
+   * PR #1 of figure-image-extraction. S3 object key, formatted as
+   * `figures/{sourceId}/{figureIndex}.{format}`. NULL = bbox-only
+   * (the figure was detected but no image was extracted).
+   */
+  storage_path?: string | null;
+  /** IANA MIME type for the extracted image (image/png, image/jpeg). */
+  mime_type?: string | null;
+  /** Pixel width of the encoded image. NULL = bbox-only. */
+  width?: number | null;
+  /** Pixel height of the encoded image. NULL = bbox-only. */
+  height?: number | null;
+  /** Total bytes of the encoded image. NULL = bbox-only. */
+  byte_size?: number | null;
   created_at?: string;
 };
 
@@ -585,23 +616,34 @@ export async function extractPDFTables(
     "pdf_table_extraction_quality_gate",
   );
 
-  if (
-    gate.action === "pass" ||
-    mode === "local" ||
-    (mode === "auto" && gate.action === "pass")
-  ) {
-    // Persist the local result and return.
-    const persisted = await persistExtractedTables(
-      sourceId,
-      localTables,
-      "local",
-    );
-    return {
-      tables: persisted.map(rowToExtractedTable),
-      figures: [],
-      provider: "local",
-    };
-  }
+    if (
+      gate.action === "pass" ||
+      mode === "local" ||
+      (mode === "auto" && gate.action === "pass")
+    ) {
+      // Persist the local result and return.
+      const persisted = await persistExtractedTables(
+        sourceId,
+        localTables,
+        "local",
+      );
+      // PR #1 of figure-image-extraction: chain the image
+      // extraction pass. Local-only path: no figure rows were
+      // persisted (the local detector is bbox-only for tables).
+      // The image pass is a no-op for this branch (no figure
+      // rows to process), but we still invoke it inside a
+      // try/catch for parity with the Mistral branch.
+      await runFigureImageExtractionSafely(
+        sourceId,
+        pdf,
+        providerCtx,
+      );
+      return {
+        tables: persisted.map(rowToExtractedTable),
+        figures: [],
+        provider: "local",
+      };
+    }
 
   // 4. Fallback to Mistral (only in `auto` mode when local failed the gate,
   //    or in `mistral` mode when local was skipped). The cost-cap path is
@@ -626,6 +668,11 @@ export async function extractPDFTables(
         sourceId,
         localTables,
         "local",
+      );
+      await runFigureImageExtractionSafely(
+        sourceId,
+        pdf,
+        providerCtx,
       );
       return {
         tables: persisted.map(rowToExtractedTable),
@@ -674,6 +721,11 @@ export async function extractPDFTables(
         localTables,
         "local",
       );
+      await runFigureImageExtractionSafely(
+        sourceId,
+        pdf,
+        providerCtx,
+      );
       return {
         tables: persisted.map(rowToExtractedTable),
         figures: [],
@@ -696,6 +748,16 @@ export async function extractPDFTables(
       const persistedFigures = await persistExtractedFigures(
         sourceId,
         mistralFigures,
+      );
+      // PR #1 of figure-image-extraction: chain the image
+      // extraction pass. The Mistral provider has populated the
+      // per-source bytes cache (consumed inside
+      // `extractFigureImages`); the render-crop fallback covers
+      // figures Mistral did not return bytes for.
+      await runFigureImageExtractionSafely(
+        sourceId,
+        pdf,
+        providerCtx,
       );
       return {
         tables: persisted.map(rowToExtractedTable),
@@ -727,6 +789,11 @@ export async function extractPDFTables(
           localTables,
           "local",
         );
+        await runFigureImageExtractionSafely(
+          sourceId,
+          pdf,
+          providerCtx,
+        );
         return {
           tables: persisted.map(rowToExtractedTable),
           figures: [],
@@ -751,6 +818,11 @@ export async function extractPDFTables(
           sourceId,
           localTables,
           "local",
+        );
+        await runFigureImageExtractionSafely(
+          sourceId,
+          pdf,
+          providerCtx,
         );
         return {
           tables: persisted.map(rowToExtractedTable),
@@ -798,5 +870,52 @@ function rowToExtractedFigure(row: ResearchEvidenceFigureRow): ExtractedFigure {
     figureIndex: row.figure_index,
     bbox: row.bbox,
     caption: row.caption,
+    // Carry the new image columns through so the orchestrator's
+    // `rowToExtractedFigure` output matches the on-disk row
+    // exactly. The figure-image-extraction orchestrator inspects
+    // `storage_path` for the write-once guard; the rest are
+    // surface-area for the evidence response.
+    bytes: null,
+    format: row.mime_type === "image/jpeg" ? "jpeg" : row.mime_type === "image/png" ? "png" : null,
+    width: row.width ?? null,
+    height: row.height ?? null,
+    byteSize: row.byte_size ?? null,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Figure-image-extraction chain helper (PR #1 of figure-image-extraction)
+// ---------------------------------------------------------------------------
+
+/**
+ * Run the figure-image extraction pass in a try/catch. On failure,
+ * log a WARN event and return — the table rows are already persisted
+ * and a misconfigured S3 / canvas must not roll them back. The
+ * image pass is intentionally separate from the table persistence
+ * path so a partial failure degrades gracefully (the viewer
+ * renders bbox-only for figures whose image extraction failed).
+ */
+async function runFigureImageExtractionSafely(
+  sourceId: string,
+  pdf: Uint8Array,
+  ctx: { runId?: string; sourceId?: string },
+): Promise<void> {
+  try {
+    // Dynamic import to avoid a module-load cycle: the
+    // orchestrator imports this module for `BBox` and
+    // `ResearchEvidenceFigureRow`; we import it back here.
+    const { extractFigureImages } = await import("./figureImageExtractor");
+    await extractFigureImages(sourceId, pdf, {
+      runId: ctx.runId,
+    });
+  } catch (err) {
+    logger.warn(
+      {
+        err,
+        event: "pdf_figure_image_extraction_failed",
+        sourceId,
+      },
+      "figure-image extraction failed; table rows remain, image columns stay null",
+    );
+  }
 }

@@ -803,7 +803,7 @@ export const researchBrainRoute = new Elysia({ prefix: "/api/research-brain" })
           return { error: "Run not found" };
         }
 
- return {
+        return {
           runId: (run as any).id,
           docsPath: (run as any).docs_path,
           status: (run as any).status,
@@ -813,6 +813,19 @@ export const researchBrainRoute = new Elysia({ prefix: "/api/research-brain" })
           failedFiles: (run as any).failed_files,
           llmCost: parseFloat((run as any).llm_cost || "0"),
           llmCallsCount: ((run as any).llm_calls || []).length,
+          // External-API spend (Mistral OCR + PubChem) — additive
+          // fields per the api-cost-guard-rails spec. `ext_api_cost`
+          // is a NUMERIC column on the row; `ext_api_calls` is a
+          // JSONB map keyed by provider. The count sums the `calls`
+          // field across all providers.
+          extApiCost: parseFloat((run as any).ext_api_cost || "0"),
+          extApiCallsCount: Object.values(
+            (run as any).ext_api_calls || {},
+          ).reduce(
+            (sum: number, entry: any) =>
+              sum + (Number(entry?.calls ?? 0) || 0),
+            0,
+          ),
           startedAt: (run as any).started_at,
           finishedAt: (run as any).finished_at,
           cancelledAt: (run as any).cancelled_at,

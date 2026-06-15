@@ -88,7 +88,13 @@ export async function notifyIngestionStarted(runId: string, totalFiles: number):
 }
 
 /**
- * Helper to create and send an ingestion:progress notification
+ * Helper to create and send an ingestion:progress notification.
+ *
+ * The optional `apiCost?` / `apiCallsCount?` carry the cumulative
+ * external-API spend (Mistral OCR + PubChem) for the run, mirroring
+ * the `llmCost` / `llmCallsCount` fields. When undefined they are
+ * omitted from the published payload — the dashboard treats absence
+ * as "no external spend yet".
  */
 export async function notifyIngestionProgress(
   runId: string,
@@ -96,6 +102,7 @@ export async function notifyIngestionProgress(
   status: "processing" | "processed" | "skipped" | "failed",
   progress: { processed: number; skipped: number; failed: number; total: number },
   error?: string,
+  options?: { apiCost?: number; apiCallsCount?: number },
 ): Promise<void> {
   await notifyIngestion({
     type: "ingestion:progress",
@@ -104,6 +111,8 @@ export async function notifyIngestionProgress(
     status,
     progress,
     error,
+    apiCost: options?.apiCost,
+    apiCallsCount: options?.apiCallsCount,
   });
 }
 
@@ -151,6 +160,26 @@ export async function notifyRunLlmCall(
     runId,
     llmCost,
     llmCallsCount,
+  });
+}
+
+/**
+ * Helper to create and send a `run:api_call` notification carrying
+ * the cumulative external-API spend (Mistral OCR + PubChem) for a
+ * run. Pairs with the `run:llm_call` event so the dashboard can
+ * show both columns. Falsy values are forwarded as-is (the WebSocket
+ * consumer skips undefined fields).
+ */
+export async function notifyRunApiCall(
+  runId: string,
+  apiCost: number,
+  apiCallsCount: number,
+): Promise<void> {
+  await notifyIngestion({
+    type: "run:api_call",
+    runId,
+    apiCost,
+    apiCallsCount,
   });
 }
 

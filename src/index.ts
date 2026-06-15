@@ -32,6 +32,7 @@ import { startRedisSubscription, stopRedisSubscription } from "./services/websoc
 import { waitlistRoute } from "./routes/waitlist";
 import { createQueueDashboard } from "./routes/admin/queue-dashboard";
 import { adminJobsRoute } from "./routes/admin/jobs";
+import { costTotalsRoute } from "./routes/admin/cost-totals";
 
 // ============================================================================
 // CORS Configuration - Security Critical
@@ -388,6 +389,9 @@ if (queueDashboard) {
 
 // Mount admin jobs API (for frontend dashboard)
 app.use(adminJobsRoute);
+
+// Mount admin cost-totals drill-down (api-cost-guard-rails PR #3)
+app.use(costTotalsRoute);
 
 // Continue with catch-all route
 app

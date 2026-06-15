@@ -19,6 +19,7 @@ import { createDocumentIngestionWorker } from "./services/queue/workers/document
 import { createBioprospectingWorker } from "./services/queue/workers/bioprospecting.worker";
 import { createCompoundAuthorityWorker } from "./services/queue/workers/compoundAuthority.worker";
 import { closeConnections } from "./services/queue/connection";
+import { startDailyApiUsageGc } from "./services/queue/dailyApiUsageGc";
 import logger from "./utils/logger";
 
 async function main() {
@@ -46,6 +47,13 @@ async function main() {
       "compound_authority_worker_disabled",
     );
   }
+
+  // Nightly GC for the `daily_api_usage` table. The spec mandates a
+  // 35-day retention window (2 full 30-day cap windows + 5-day clock
+  // skew buffer). Gated by `COST_GUARD_GC_ENABLED` (default true).
+  // Failures are logged and NEVER crash the worker — the next tick
+  // retries.
+  startDailyApiUsageGc();
 
   logger.info(
     {

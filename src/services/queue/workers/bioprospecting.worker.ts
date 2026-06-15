@@ -73,6 +73,11 @@ async function processExtractionJob(job: Job<BioprospectingJobData, any>): Promi
     // (`pdfTableExtractor` → `MistralTableExtractionProvider` →
     // `costService`) can attribute Mistral OCR / PubChem spend to
     // the right ingestion run.
+    //
+    // The extractor itself emits a `run:api_call` notification
+    // (fire-and-forget) once `ensureTablesForSource` returns, so
+    // the WebSocket consumer sees the Mistral / PubChem delta
+    // without the worker waiting for a follow-up DB read.
     const { extractBioprospectingFactsForSource } = await import("../../../services/researchBrain");
     await extractBioprospectingFactsForSource(sourceId, { runId });
 

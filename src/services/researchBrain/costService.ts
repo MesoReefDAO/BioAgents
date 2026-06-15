@@ -24,6 +24,10 @@
 
 import { getServiceClient } from "../../db/client";
 import logger from "../../utils/logger";
+import { notifyRunApiCall } from "../queue/notify";
+// Note: costService.ts → queue/notify.ts → queue/types.ts is a
+// dependency chain the build graph tolerates. notify.ts does not
+// import from costService, so this stays acyclic.
 
 // ---------------------------------------------------------------------------
 // Types
@@ -601,4 +605,102 @@ export async function getMonthUsage(
   } catch {
     return { costUsd: 0 };
   }
+}
+
+// ---------------------------------------------------------------------------
+// In-memory run spend cache + WebSocket delta
+// ---------------------------------------------------------------------------
+//
+// The dashboard's "Runs" table shows `ext_api_cost` and
+// `ext_api_calls_count` for the active run. These are read from the
+// `research_ingestion_runs` row by the HTTP route, but a fresh read
+// per WebSocket event is wasteful. We keep a process-local cache
+// keyed by `runId` so the bioprospecting worker (and any other
+// caller) can `notifyApiCallDelta` and the dashboard UI updates in
+// near-real-time without hitting Postgres.
+//
+// The cache lives on `globalThis` to be TDZ-safe in Bun workers.
+
+interface RunApiSpendSnapshot {
+  apiCost: number;
+  apiCallsCount: number;
+}
+
+const RUN_API_SPEND_CACHE_KEY = "__apiCostGuardRailsRunSpendCache";
+
+function getRunApiSpendCache(): Map<string, RunApiSpendSnapshot> {
+  const g = globalThis as Record<string, unknown>;
+  let cache = g[RUN_API_SPEND_CACHE_KEY] as
+    | Map<string, RunApiSpendSnapshot>
+    | undefined;
+  if (!cache) {
+    cache = new Map();
+    g[RUN_API_SPEND_CACHE_KEY] = cache;
+  }
+  return cache;
+}
+
+/**
+ * Clear the in-memory run-spend cache. Test helper — never call in
+ * production code. Resets every cached `runId` snapshot.
+ */
+export function resetRunApiSpendCache(): void {
+  getRunApiSpendCache().clear();
+}
+
+/**
+ * Record a delta to the run's external-API spend and emit a
+ * `run:api_call` WebSocket notification. Used by the bioprospecting
+ * extractor / worker after a `recordApiCall` returns the post-call
+ * counter for the active run.
+ *
+ * Behavior:
+ *  - `runId` is REQUIRED: a no-op (return early) when undefined so
+ *    manual one-off scripts (no runId) don't crash.
+ *  - Negative deltas (e.g., a rollback) update the cache but do NOT
+ *    fire a notification — the dashboard's HTTP read pulls the
+ *    authoritative value from `research_ingestion_runs`.
+ *  - The notification is fire-and-forget. A publish failure logs
+ *    `api_call_notify_failed` and does NOT throw.
+ *
+ * The caller is responsible for clamping the delta to the post-call
+ * counter (so a call that was rolled back does not over-count). The
+ * most common pattern is to pass the `currentSpend` from the RPC
+ * return value minus the previous snapshot.
+ */
+export function notifyApiCallDelta(
+  runId: string | undefined,
+  deltaCost: number,
+  deltaCalls: number,
+): void {
+  if (!runId) return;
+  const cache = getRunApiSpendCache();
+  const prior = cache.get(runId) ?? { apiCost: 0, apiCallsCount: 0 };
+  const next: RunApiSpendSnapshot = {
+    apiCost: Math.max(0, prior.apiCost + (Number.isFinite(deltaCost) ? deltaCost : 0)),
+    apiCallsCount: Math.max(
+      0,
+      prior.apiCallsCount + (Number.isFinite(deltaCalls) ? deltaCalls : 0),
+    ),
+  };
+  cache.set(runId, next);
+
+  // Only notify on positive deltas — a rollback should be
+  // observable via the next HTTP read.
+  if (deltaCost <= 0 && deltaCalls <= 0) return;
+
+  void notifyRunApiCall(runId, next.apiCost, next.apiCallsCount).catch(
+    (err) => {
+      logger.warn(
+        {
+          err,
+          event: "api_call_notify_failed",
+          runId,
+          apiCost: next.apiCost,
+          apiCallsCount: next.apiCallsCount,
+        },
+        "notifyRunApiCall failed; non-fatal",
+      );
+    },
+  );
 }

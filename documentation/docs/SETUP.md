@@ -468,6 +468,34 @@ The `costService` module exposes read-side helpers:
 These helpers soft-fail (return zeros / empty list) on DB
 errors so they are safe to call from any code path.
 
+### Admin drill-down
+
+`GET /api/admin/cost-totals?since=24h|7d|30d&provider=mistral_ocr|pubchem|all`
+returns per-(day, provider) totals with cap utilization columns
+(`pctOfDailyCap`, `pctOfMonthlyCap`, `lastCapWarnAt`) and an
+aggregate `capUtilization` block per provider (`peakDay`,
+`averageDay`, `daysAt80pct`, `daysAt100pct`). The route is
+gated by `authResolver({ required: true, role: 'admin' })`.
+
+### WebSocket payload
+
+The `run:api_call` notification carries `apiCost` and
+`apiCallsCount`; the `ingestion:progress` notification gains
+the same optional fields (omitted when no external spend has
+been recorded). The bioprospecting extractor / worker fires
+`notifyApiCallDelta` after each call so the dashboard updates
+in near-real-time.
+
+### Nightly GC
+
+The worker process runs `DELETE FROM daily_api_usage WHERE
+day < CURRENT_DATE - INTERVAL '35 days'` every 24 hours
+(starting 30s after worker boot). The 35-day window preserves
+two 30-day cap windows plus a 5-day clock-skew buffer. Set
+`COST_GUARD_GC_ENABLED=false` to disable in environments where
+`pg_cron` is doing the same job. Failures log
+`cost_guard_gc_failed` and never crash the worker.
+
 ---
 
 ## Running the Application

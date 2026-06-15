@@ -53,26 +53,26 @@ Chain strategy: stacked-to-main
 
 ## Phase 3: PR #3 — PubChem + Admin + WebSocket
 
-- [ ] 3.1 `compoundAuthority.ts` `pubchemFetch`: pre-call `checkCap({provider:'pubchem', estimatedCostUsd:0, units:1})` BEFORE `gate.take()`; on `allowed===false` log `event=pubchem_disabled_today,reason=cost_cap` and throw `CostCapExceededError({scope:'day'})`; after 2xx → `recordApiCall({provider:'pubchem', units:1, costUsd:0, runId:opts?.runId, sourceId:opts?.sourceId})` (soft-fail); keep `RateGate`
-- [ ] 3.2 `compoundAuthority.worker.ts`: call `costService.isProviderDisabled('pubchem')` BEFORE `normalizeBioprospectingCompounds`; on true log `event=pubchem_disabled_today,reason=cost_cap` and return `{scannedFacts:0,…,capHit:'day'}` (extend `CompoundAuthorityJobResult`)
-- [ ] 3.3 `types.ts`: extend `CompoundAuthorityJobResult` with `capHit?:'day'|'month'`; extend `IngestionProgressNotification` with optional `apiCost?:number`, `apiCallsCount?:number`; add `'run:api_call'` to `IngestionNotificationType`
-- [ ] 3.4 `notify.ts`: `notifyRunApiCall(runId, apiCost, apiCallsCount)` → `notifyIngestion({type:'run:api_call', runId, apiCost, apiCallsCount})`; extend `notifyIngestionProgress` to accept optional `apiCost?`/`apiCallsCount?`
-- [ ] 3.5 `costService.ts`: `notifyApiCallDelta(runId, deltaCost, deltaCalls)` — when positive, calls `notifyRunApiCall` and updates in-memory `runApiCostCache`; fire-and-forget; failure logs `event=api_call_notify_failed`
-- [ ] 3.6 `research-brain.ts` `/ingestion/runs/:id` (line 814): add `extApiCost: parseFloat((run as any).ext_api_cost || '0')` and `extApiCallsCount: Object.values((run as any).ext_api_calls || {}).reduce((s:number,p:any)=>s+(p?.calls||0),0)`; preserve `llmCost`/`llmCallsCount`
-- [ ] 3.7 Create `src/routes/admin/cost-totals.ts`: `GET /admin/cost-totals?since=24h|7d|30d&provider=mistral_ocr|pubchem|all`; `beforeHandle: authResolver({required:true, role:'admin'})`; query `daily_api_usage` JOIN env caps; response `{rows:[{day,provider,costUsd,units,calls,dailyCap,monthlyCap,pctOfDailyCap,pctOfMonthlyCap,lastCapWarnAt}], capUtilization:{peakDay,averageDay,daysAt80pct,daysAt100pct}}`; export `costTotalsRoute`
-- [ ] 3.8 Mount in `src/index.ts` next to `adminJobsRoute` (line 390): `app.use(costTotalsRoute);` (prefix `/admin`)
-- [ ] 3.9 `bioprospectingExtractor.ts` after `ensureTablesForSource`: call `costService.notifyApiCallDelta(runId, …)` (skip when no `runId`)
-- [ ] 3.10 `bioprospecting.worker.ts` after successful extraction: call `costService.notifyApiCallDelta(runId, …)` to push `ext_api_cost`/`ext_api_calls` to WebSocket
-- [ ] 3.11 `__tests__/compoundAuthority.costCap.test.ts` (mock `costService`): `pubchemFetch` throws `CostCapExceededError` on `checkCap.allowed===false`; `recordApiCall` after 2xx with `{provider:'pubchem', units:1, costUsd:0}`; RPC exception does NOT abort fetch
-- [ ] 3.12 `__tests__/compoundAuthority.worker.costCap.test.ts`: mock `isProviderDisabled`→true; worker returns `capHit:'day'` without calling `normalizeBioprospectingCompounds`; `pubchem_disabled_today` log
-- [ ] 3.13 `__tests__/cost-totals.test.ts` (mock `getServiceClient`): admin caller with 24h rows → `{rows:[…], capUtilization:{…}}` with `pctOfDailyCap`/`pctOfMonthlyCap`; non-admin → 401/403; `daysAt80pct` over 3 days (50/85/100%) → 2
-- [ ] 3.14 `__tests__/notify.apiCost.test.ts`: `notifyRunApiCall` JSON includes `apiCost`/`apiCallsCount`; `IngestionProgressNotification` accepts new optional fields; `JSON.stringify({…base, apiCost:undefined})` omits the key
-- [ ] 3.15 `__tests__/research-brain.runsExtApiCost.test.ts`: run with `ext_api_cost=2.50`, `ext_api_calls={mistral_ocr:{calls:5,costUsd:2.50,units:50}}` → `{extApiCost:2.50, extApiCallsCount:5, llmCost:…}`; `llmCost` preserved
-- [ ] 3.16 `worker.ts`: nightly GC `setInterval(24h)` running `DELETE FROM daily_api_usage WHERE day < CURRENT_DATE - INTERVAL '35 days'`, gated by `COST_GUARD_GC_ENABLED` (default true); log `cost_guard_gc_completed`; failure logs `cost_guard_gc_failed` (NEVER crash worker)
+- [x] 3.1 `compoundAuthority.ts` `pubchemFetch`: pre-call `checkCap({provider:'pubchem', estimatedCostUsd:0, units:1})` BEFORE `gate.take()`; on `allowed===false` log `event=pubchem_disabled_today,reason=cost_cap` and throw `CostCapExceededError({scope:'day'})`; after 2xx → `recordApiCall({provider:'pubchem', units:1, costUsd:0, runId:opts?.runId, sourceId:opts?.sourceId})` (soft-fail); keep `RateGate`
+- [x] 3.2 `compoundAuthority.worker.ts`: call `costService.isProviderDisabled('pubchem')` BEFORE `normalizeBioprospectingCompounds`; on true log `event=pubchem_disabled_today,reason=cost_cap` and return `{scannedFacts:0,…,capHit:'day'}` (extend `CompoundAuthorityJobResult`)
+- [x] 3.3 `types.ts`: extend `CompoundAuthorityJobResult` with `capHit?:'day'|'month'`; extend `IngestionProgressNotification` with optional `apiCost?:number`, `apiCallsCount?:number`; add `'run:api_call'` to `IngestionNotificationType`
+- [x] 3.4 `notify.ts`: `notifyRunApiCall(runId, apiCost, apiCallsCount)` → `notifyIngestion({type:'run:api_call', runId, apiCost, apiCallsCount})`; extend `notifyIngestionProgress` to accept optional `apiCost?`/`apiCallsCount?`
+- [x] 3.5 `costService.ts`: `notifyApiCallDelta(runId, deltaCost, deltaCalls)` — when positive, calls `notifyRunApiCall` and updates in-memory `runApiCostCache`; fire-and-forget; failure logs `event=api_call_notify_failed`
+- [x] 3.6 `research-brain.ts` `/ingestion/runs/:id` (line 814): add `extApiCost: parseFloat((run as any).ext_api_cost || '0')` and `extApiCallsCount: Object.values((run as any).ext_api_calls || {}).reduce((s:number,p:any)=>s+(p?.calls||0),0)`; preserve `llmCost`/`llmCallsCount`
+- [x] 3.7 Create `src/routes/admin/cost-totals.ts`: `GET /admin/cost-totals?since=24h|7d|30d&provider=mistral_ocr|pubchem|all`; `beforeHandle: authResolver({required:true, role:'admin'})`; query `daily_api_usage` JOIN env caps; response `{rows:[{day,provider,costUsd,units,calls,dailyCap,monthlyCap,pctOfDailyCap,pctOfMonthlyCap,lastCapWarnAt}], capUtilization:{peakDay,averageDay,daysAt80pct,daysAt100pct}}`; export `costTotalsRoute`
+- [x] 3.8 Mount in `src/index.ts` next to `adminJobsRoute` (line 390): `app.use(costTotalsRoute);` (prefix `/admin`)
+- [x] 3.9 `bioprospectingExtractor.ts` after `ensureTablesForSource`: call `costService.notifyApiCallDelta(runId, …)` (skip when no `runId`)
+- [x] 3.10 `bioprospecting.worker.ts` after successful extraction: call `costService.notifyApiCallDelta(runId, …)` to push `ext_api_cost`/`ext_api_calls` to WebSocket
+- [x] 3.11 `__tests__/compoundAuthority.costCap.test.ts` (mock `costService`): `pubchemFetch` throws `CostCapExceededError` on `checkCap.allowed===false`; `recordApiCall` after 2xx with `{provider:'pubchem', units:1, costUsd:0}`; RPC exception does NOT abort fetch
+- [x] 3.12 `__tests__/compoundAuthority.worker.costCap.test.ts`: mock `isProviderDisabled`→true; worker returns `capHit:'day'` without calling `normalizeBioprospectingCompounds`; `pubchem_disabled_today` log
+- [x] 3.13 `__tests__/cost-totals.test.ts` (mock `getServiceClient`): admin caller with 24h rows → `{rows:[…], capUtilization:{…}}` with `pctOfDailyCap`/`pctOfMonthlyCap`; non-admin → 401/403; `daysAt80pct` over 3 days (50/85/100%) → 2
+- [x] 3.14 `__tests__/notify.apiCost.test.ts`: `notifyRunApiCall` JSON includes `apiCost`/`apiCallsCount`; `IngestionProgressNotification` accepts new optional fields; `JSON.stringify({…base, apiCost:undefined})` omits the key
+- [x] 3.15 `__tests__/research-brain.runsExtApiCost.test.ts`: run with `ext_api_cost=2.50`, `ext_api_calls={mistral_ocr:{calls:5,costUsd:2.50,units:50}}` → `{extApiCost:2.50, extApiCallsCount:5, llmCost:…}`; `llmCost` preserved
+- [x] 3.16 `worker.ts`: nightly GC `setInterval(24h)` running `DELETE FROM daily_api_usage WHERE day < CURRENT_DATE - INTERVAL '35 days'`, gated by `COST_GUARD_GC_ENABLED` (default true); log `cost_guard_gc_completed`; failure logs `cost_guard_gc_failed` (NEVER crash worker)
 
 ## Phase 4: Cross-Cutting
 
-- [ ] 4.1 Add `ext_api_cost`/`ext_api_calls` to `ResearchIngestionRun` TypeScript type in `src/types/`; re-export `recordApiCall`/`checkCap`/`isProviderDisabled` from `src/services/researchBrain/index.ts`
-- [ ] 4.2 `SETUP.md` Cost Guard Rails: PubChem caps, WebSocket payload field names, admin route URL, nightly GC cadence
-- [ ] 4.3 `bun test` (all new tests pass); `bun test recordApiCall.rpc.test.ts` against local Postgres (FOR UPDATE); `tsc --noEmit` (no errors from `extract(pdf, ctx?)` signature changes)
-- [ ] 4.4 Confirm 3-PR diffs each < 400 changed lines: PR #1 ≈ 280; PR #2 ≈ 220; PR #3 ≈ 250
+- [x] 4.1 Add `ext_api_cost`/`ext_api_calls` to `ResearchIngestionRun` TypeScript type in `src/types/`; re-export `recordApiCall`/`checkCap`/`isProviderDisabled` from `src/services/researchBrain/index.ts`
+- [x] 4.2 `SETUP.md` Cost Guard Rails: PubChem caps, WebSocket payload field names, admin route URL, nightly GC cadence
+- [x] 4.3 `bun test` (all new tests pass); `bun test recordApiCall.rpc.test.ts` against local Postgres (FOR UPDATE); `tsc --noEmit` (no errors from `extract(pdf, ctx?)` signature changes)
+- [x] 4.4 Confirm 3-PR diffs each < 400 changed lines: PR #1 ≈ 280; PR #2 ≈ 220; PR #3 ≈ 250

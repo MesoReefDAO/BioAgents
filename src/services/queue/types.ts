@@ -230,6 +230,10 @@ export type CompoundAuthorityJobData = Record<string, never>;
  * Mirrors the design's "run summary" log line; the worker emits this
  * as a structured logger event so operators can grep
  * `compound_authority_run_summary` during rollout.
+ *
+ * `capHit` is set when the worker aborts cleanly on a daily/monthly
+ * cost cap; the operator can see why facts were not resolved this
+ * cycle. Values mirror the `api-cost-guard-rails` spec scope enum.
  */
 export type CompoundAuthorityJobResult = {
   scannedFacts: number;
@@ -239,6 +243,7 @@ export type CompoundAuthorityJobResult = {
   retriesScheduled: number;
   failed: number;
   elapsed: number;
+  capHit?: "day" | "month";
 };
 
 /**
@@ -263,6 +268,7 @@ export type IngestionNotificationType =
   | "ingestion:completed"
   | "ingestion:failed"
   | "run:llm_call"
+  | "run:api_call"
   | "run:cancelled";
 
 /**
@@ -282,6 +288,8 @@ export interface IngestionProgressNotification {
   error?: string;
   llmCost?: number;
   llmCallsCount?: number;
+  apiCost?: number;
+  apiCallsCount?: number;
 }
 
 /**

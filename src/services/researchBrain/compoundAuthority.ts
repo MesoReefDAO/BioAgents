@@ -1,5 +1,14 @@
 import { getServiceClient } from "../../db/client";
 import logger from "../../utils/logger";
+import {
+  checkCap,
+  recordApiCall,
+  CostCapExceededError,
+  isProviderDisabled,
+} from "./costService";
+// Re-export so callers (and tests) can `import { CostCapExceededError }
+// from "../compoundAuthority"` without reaching into costService.
+export { CostCapExceededError } from "./costService";
 import type {
   BioprospectingFact,
   CompoundAuthorityAuditEvent,
@@ -1068,10 +1077,16 @@ export function parseRetryAfter(value: string | null, fallbackMs: number = 30_00
 /**
  * Internal fetch wrapper that:
  *   - respects the rate gate (`gate.take()` first)
+ *   - pre-checks the daily request cap via `costService.checkCap` and
+ *     throws `CostCapExceededError({ scope: 'day' })` on a hit
+ *   - short-circuits via `globalThis.__pubchemDisabled__` when the
+ *     same process has already hit the cap today
  *   - applies a 12s timeout via `AbortController`
  *   - throws `PubChemRateLimited` on 429/503 with the parsed Retry-After
  *     (and pauses the gate so the next caller waits too)
  *   - throws `PubChemNotFound` on 404
+ *   - records the call via `costService.recordApiCall` on 2xx so the
+ *     cap check consults the updated counter on the next pass
  *   - returns parsed JSON on 2xx
  *   - logs and rethrows other non-2xx (caller decides whether to retry)
  *
@@ -1081,8 +1096,35 @@ export function parseRetryAfter(value: string | null, fallbackMs: number = 30_00
 async function pubchemFetch(
   url: string,
   gate: RateGate,
-  opts?: { fetchImpl?: typeof fetch },
+  opts?: { fetchImpl?: typeof fetch; runId?: string; sourceId?: string },
 ): Promise<unknown> {
+  // Pre-call cap check. PubChem is free, but the daily request cap
+  // (PUBCHEM_DAILY_REQUEST_CAP, default 200K) counts `units`, not
+  // `costUsd`. `checkCap` short-circuits when the globalThis flag is
+  // already set; the globalThis flag is set by `recordApiCall` when
+  // the RPC returns cap_hit='day'.
+  if (isProviderDisabled("pubchem")) {
+    logger.warn(
+      { event: "pubchem_disabled_today", reason: "cost_cap", url },
+      "pubchem fetch short-circuited (provider disabled)",
+    );
+    throw new CostCapExceededError({ scope: "day", provider: "pubchem" });
+  }
+  const cap = await checkCap({
+    provider: "pubchem",
+    estimatedCostUsd: 0,
+    units: 1,
+    ...(opts?.runId ? { runId: opts.runId } : {}),
+    ...(opts?.sourceId ? { sourceId: opts.sourceId } : {}),
+  });
+  if (!cap.allowed) {
+    logger.warn(
+      { event: "pubchem_disabled_today", reason: "cost_cap", url },
+      "pubchem fetch refused by pre-call cap check",
+    );
+    throw new CostCapExceededError({ scope: "day", provider: "pubchem" });
+  }
+
   await gate.take();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), PUBCHEM_TIMEOUT_MS);
@@ -1118,6 +1160,18 @@ async function pubchemFetch(
     const text = await response.text().catch(() => "");
     throw new Error(`pubchem ${response.status}: ${text.slice(0, 200)}`);
   }
+
+  // Post-call increment. PubChem is free (costUsd=0); the daily cap
+  // counts requests, so we record `units: 1`. Soft-fails on RPC
+  // exception — `recordApiCall` never throws.
+  await recordApiCall({
+    provider: "pubchem",
+    units: 1,
+    costUsd: 0,
+    ...(opts?.runId ? { runId: opts.runId } : {}),
+    ...(opts?.sourceId ? { sourceId: opts.sourceId } : {}),
+  });
+
   return response.json();
 }
 

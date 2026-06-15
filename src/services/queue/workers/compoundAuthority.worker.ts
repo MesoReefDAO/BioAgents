@@ -31,6 +31,7 @@ import {
   normalizeBioprospectingCompounds,
   getCompoundAuthorityConfig,
 } from "../../researchBrain/compoundAuthority";
+import { isProviderDisabled } from "../../researchBrain/costService";
 
 /**
  * Create and start the compound-authority worker. Returns the
@@ -93,11 +94,35 @@ export function createCompoundAuthorityWorker(): Worker<
   return worker;
 }
 
-async function processCompoundAuthorityJob(
+export async function processCompoundAuthorityJob(
   job: Job<CompoundAuthorityJobData, CompoundAuthorityJobResult>,
 ): Promise<CompoundAuthorityJobResult> {
   logger.info({ jobId: job.id }, "compound_authority_job_started");
   try {
+    // Pre-tick day-cap check. PubChem is free, but the daily request
+    // cap (PUBCHEM_DAILY_REQUEST_CAP, default 200K) limits the number
+    // of API calls per UTC day. When the cap is already exhausted in
+    // this process, abort cleanly with `capHit: 'day'` and log
+    // `pubchem_disabled_today` so operators can see why this pass
+    // skipped facts. The next scheduler tick re-picks the same
+    // `pending` facts — the cap will reset at UTC midnight.
+    if (isProviderDisabled("pubchem")) {
+      logger.warn(
+        { event: "pubchem_disabled_today", reason: "cost_cap", jobId: job.id },
+        "compound authority worker aborted: pubchem daily cap hit",
+      );
+      return {
+        scannedFacts: 0,
+        aliasHits: 0,
+        pubchemHits: 0,
+        pubchemMisses: 0,
+        retriesScheduled: 0,
+        failed: 0,
+        elapsed: 0,
+        capHit: "day",
+      };
+    }
+
     // Thread the env-driven config through to the driver. The
     // driver itself falls back to the module-level cached config
     // when params are absent, but we pass them explicitly so the

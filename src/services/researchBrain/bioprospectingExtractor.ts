@@ -9,6 +9,7 @@ import {
   attachCompoundAuthority,
   loadAliasMap,
 } from "./compoundAuthority";
+import { notifyApiCallDelta } from "./costService";
 import {
   getSource,
   replaceBioprospectingFactsForSource,
@@ -405,6 +406,15 @@ export async function extractBioprospectingFactsForSource(
     // logged but do NOT abort the LLM pass (the LLM still has the
     // chunks to work with). The `runId` is threaded so the cost-cap
     // layer can attribute spend to the right ingestion run.
+    //
+    // Capture the run's `ext_api_cost` / `ext_api_calls` BEFORE the
+    // call so we can notify the dashboard of the delta afterwards.
+    // The notification is fire-and-forget; a read failure logs and
+    // continues.
+    const beforeTotals = runId
+      ? await readRunExtApiTotals(runId)
+      : { cost: 0, calls: 0 };
+
     let tables: ExtractedTable[] = [];
     try {
       tables = await ensureTablesForSource(source, { runId });
@@ -412,6 +422,15 @@ export async function extractBioprospectingFactsForSource(
       logger.warn(
         { err: error, sourceId },
         "bioprospecting_table_extraction_failed_continuing",
+      );
+    }
+
+    if (runId) {
+      const afterTotals = await readRunExtApiTotals(runId);
+      notifyApiCallDelta(
+        runId,
+        afterTotals.cost - beforeTotals.cost,
+        afterTotals.calls - beforeTotals.calls,
       );
     }
 
@@ -557,4 +576,38 @@ async function ensureTablesForSource(
     "bioprospecting_table_extraction_completed",
   );
   return result.tables;
+}
+
+/**
+ * Read the run's current `ext_api_cost` and total `ext_api_calls`
+ * count from `research_ingestion_runs`. Returns zeros on read
+ * failure so the delta notification is a no-op rather than
+ * throwing out of the extraction path.
+ *
+ * Used to compute the post-extraction delta for the
+ * `run:api_call` WebSocket payload. The `costService.recordApiCall`
+ * path is authoritative for the numbers; this helper is a thin
+ * read-through to give the WebSocket consumer a real-time push.
+ */
+async function readRunExtApiTotals(
+  runId: string,
+): Promise<{ cost: number; calls: number }> {
+  try {
+    const supabase = getServiceClient();
+    const { data, error } = await supabase
+      .from("research_ingestion_runs")
+      .select("ext_api_cost, ext_api_calls")
+      .eq("id", runId)
+      .maybeSingle();
+    if (error || !data) return { cost: 0, calls: 0 };
+    const row = data as { ext_api_cost?: number | string; ext_api_calls?: Record<string, { calls?: number }> };
+    const cost = Number(row.ext_api_cost ?? 0);
+    const calls = Object.values(row.ext_api_calls ?? {}).reduce(
+      (sum: number, entry) => sum + (Number(entry?.calls ?? 0) || 0),
+      0,
+    );
+    return { cost, calls };
+  } catch {
+    return { cost: 0, calls: 0 };
+  }
 }

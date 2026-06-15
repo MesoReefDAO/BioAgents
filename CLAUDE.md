@@ -148,6 +148,25 @@ YOU MUST:
   bbox, page, and type are all restored from `#bbox=…,#page=…,
   #type=…`. The hash is also deep-linkable for sharing.
 
+#### Figure Image Extraction (figure-image-extraction PR #1 + PR #2)
+
+- Extracted figure images are stored at `figures/{sourceId}/{figureIndex}.{format}`
+  in S3 and surfaced via the auth-gated endpoint
+  `GET /api/research-brain/figures/:figureId/image`.
+- The lightbox renders a cropped `<img>` header for figures with
+  `imageUrl` (with `role="img"`, `aria-label`, `loading="lazy"`),
+  plus "Open image" and "Download" buttons (gated on `imageUrl`).
+- Bbox color split: **green** = figure with extracted image,
+  **purple** = bbox-only (extraction failed or pending). Tables
+  and chunks keep their pre-existing blue/yellow colors.
+- Mistral OCR provider is flipped to `include_image_base64: true`
+  by default (`MISTRAL_OCR_INCLUDE_IMAGE_BASE64` env var) to
+  receive raster figures in the response.
+- **v1 limitation**: local XObject extraction (PDF embedded images)
+  is `wontfix: documented-v1-limitation` per the spike NO-GO
+  against `pdfjs-dist@5.4.296` legacy build. v1 ships on Mistral
+  raster + render-crop vector paths only.
+
 ---
 
 ## Tech Stack

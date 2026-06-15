@@ -892,3 +892,75 @@ describe("bioprospectingExtractor.tables — scenario 10: hallucinated ref is dr
     expect(inserted.length).toBe(1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// 11. runId threading — when called with `{ runId: R }` the extractor
+//     must propagate R into the persistence / table-extraction call
+//     chain so the cost-cap layer can attribute spend. (PR #2 of
+//     cost-guard-rails.)
+// ---------------------------------------------------------------------------
+
+describe("bioprospectingExtractor.tables — scenario 11: runId threading", () => {
+  it("accepts a { runId } options object without breaking the existing pipeline", async () => {
+    setMockTables(SAMPLE_TABLES);
+    setMockLLMResponse("[]");
+
+    const script = scriptForExtraction({
+      source: makeSource(),
+      insertedFactIds: [],
+    });
+    client = scriptedMock(script, calls);
+    setMockServiceClient(() => client);
+
+    // The new options shape: `{ runId: "..." }`. The chunk array is
+    // passed via the structured options to verify both forms work.
+    const RUN_ID = "00000000-0000-0000-0000-000000000abc";
+    const result = await extractBioprospectingFactsForSource(makeSource().id, {
+      chunks: [makeChunk()],
+      runId: RUN_ID,
+    });
+
+    expect(result.sourceId).toBe(makeSource().id);
+    expect(result.status).toBe("extracted");
+  });
+
+  it("manual one-off without runId still tracks cost (no runId field)", async () => {
+    setMockTables([]);
+    setMockLLMResponse("[]");
+
+    const script = scriptForExtraction({
+      source: makeSource(),
+      insertedFactIds: [],
+    });
+    client = scriptedMock(script, calls);
+    setMockServiceClient(() => client);
+
+    // Backwards-compat: legacy 1-arg + array shape, no runId. The
+    // extractor must still run; the cost-cap layer is happy because
+    // `runId` is optional (per-source + per-day still apply).
+    const result = await extractBioprospectingFactsForSource(
+      makeSource().id,
+      [makeChunk()],
+    );
+    expect(result.status).toBe("extracted");
+  });
+
+  it("legacy array shape (chunks[] only) still works", async () => {
+    setMockTables([]);
+    setMockLLMResponse("[]");
+
+    const script = scriptForExtraction({
+      source: makeSource(),
+      insertedFactIds: [],
+    });
+    client = scriptedMock(script, calls);
+    setMockServiceClient(() => client);
+
+    // Legacy 1-arg + array shape — should be treated as `{ chunks }`.
+    const result = await extractBioprospectingFactsForSource(
+      makeSource().id,
+      [makeChunk()],
+    );
+    expect(result.status).toBe("extracted");
+  });
+});

@@ -467,7 +467,10 @@ export class LocalTableExtractionProvider implements TableExtractionProvider {
 
   constructor(private readonly loadPdfjs: LocalProviderDeps) {}
 
-  async extract(pdf: Uint8Array): Promise<ExtractedTable[]> {
+  async extract(
+    pdf: Uint8Array,
+    _ctx?: { runId?: string; sourceId?: string },
+  ): Promise<ExtractedTable[]> {
     const pdfjs = await this.loadPdfjs();
 
     let doc: any;

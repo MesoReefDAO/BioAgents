@@ -336,10 +336,39 @@ async function llmFactsForChunkBatchWithRetries(params: {
     : new Error("Bioprospecting batch failed");
 }
 
+/**
+ * Options for `extractBioprospectingFactsForSource`. Both fields are
+ * optional; passing nothing preserves the original 1-arg shape.
+ *
+ * `chunks` — pre-loaded evidence chunks (skips the DB read; useful
+ * for callers that already have the chunks in hand, e.g. the
+ * document-ingestion worker).
+ *
+ * `runId` — the research ingestion run id; threaded into the
+ * `pdfTableExtractor` → `MistralTableExtractionProvider` →
+ * `costService.checkCap`/`recordApiCall` chain so the cost-cap
+ * layer can attribute spend and enforce the per-run cap.
+ */
+export interface ExtractBioprospectingOptions {
+  chunks?: ResearchEvidenceChunk[];
+  runId?: string;
+}
+
 export async function extractBioprospectingFactsForSource(
   sourceId: string,
-  existingChunks?: ResearchEvidenceChunk[],
+  optionsOrChunks?: ResearchEvidenceChunk[] | ExtractBioprospectingOptions,
 ): Promise<{ sourceId: string; factCount: number; status: string }> {
+  // Backwards-compat: the second arg used to be `existingChunks`. If
+  // it's a plain array, treat it as `{ chunks }`; if it's an object,
+  // use the structured options.
+  const options: ExtractBioprospectingOptions = Array.isArray(
+    optionsOrChunks,
+  )
+    ? { chunks: optionsOrChunks }
+    : optionsOrChunks ?? {};
+  const existingChunks = options.chunks;
+  const runId = options.runId;
+
   const source = await getSource(sourceId);
   if (!source) throw new Error(`Research source not found: ${sourceId}`);
 
@@ -374,10 +403,11 @@ export async function extractBioprospectingFactsForSource(
     // quality-gated pipeline on a miss. We invoke it inside the same
     // "running" block so observability captures it; failures are
     // logged but do NOT abort the LLM pass (the LLM still has the
-    // chunks to work with).
+    // chunks to work with). The `runId` is threaded so the cost-cap
+    // layer can attribute spend to the right ingestion run.
     let tables: ExtractedTable[] = [];
     try {
-      tables = await ensureTablesForSource(source);
+      tables = await ensureTablesForSource(source, { runId });
     } catch (error) {
       logger.warn(
         { err: error, sourceId },
@@ -463,11 +493,15 @@ export async function extractBioprospectingFactsForSource(
  * Idempotency: the orchestrator's cache check returns
  * `provider: "cache"` on a hit, so re-running this for the same
  * source is a single DB read.
+ *
+ * The optional `{ runId }` is threaded into the orchestrator's
+ * provider call so `costService.recordApiCall` can attribute spend
+ * to the active ingestion run.
  */
-async function ensureTablesForSource(source: {
-  id: string;
-  file_path?: string | null;
-}): Promise<ExtractedTable[]> {
+async function ensureTablesForSource(
+  source: { id: string; file_path?: string | null },
+  options?: { runId?: string },
+): Promise<ExtractedTable[]> {
   // Try the cache first — the most common path on re-runs.
   const cached = await loadTablesForSource(source.id);
   if (cached.length > 0) return cached;
@@ -507,10 +541,15 @@ async function ensureTablesForSource(source: {
   // every caller of the extractor (e.g., the contradiction detector,
   // the verifier, the memory writer — none of them need this).
   const { extractPDFTables } = await import("../files/pdfTableExtractor");
-  const result = await extractPDFTables(source.id, new Uint8Array(buffer));
+  const result = await extractPDFTables(
+    source.id,
+    new Uint8Array(buffer),
+    { runId: options?.runId, sourceId: source.id },
+  );
   logger.info(
     {
       sourceId: source.id,
+      runId: options?.runId,
       tableCount: result.tables.length,
       figureCount: result.figures.length,
       provider: result.provider,

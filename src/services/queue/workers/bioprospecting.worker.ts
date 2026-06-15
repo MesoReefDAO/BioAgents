@@ -68,9 +68,13 @@ async function processExtractionJob(job: Job<BioprospectingJobData, any>): Promi
   const startTime = Date.now();
 
   try {
-    // Extract bioprospecting facts from the source
+    // Extract bioprospecting facts from the source. The `runId` is
+    // threaded into the extractor so the cost-cap layer
+    // (`pdfTableExtractor` → `MistralTableExtractionProvider` →
+    // `costService`) can attribute Mistral OCR / PubChem spend to
+    // the right ingestion run.
     const { extractBioprospectingFactsForSource } = await import("../../../services/researchBrain");
-    await extractBioprospectingFactsForSource(sourceId);
+    await extractBioprospectingFactsForSource(sourceId, { runId });
 
     // Record LLM cost estimate
     const { providerName, model } = resolveResearchBrainLLM();

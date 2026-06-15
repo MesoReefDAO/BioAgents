@@ -28,6 +28,14 @@ import { loadPdfjsLegacy } from "./loaders/pdfjsLegacy";
 import { LocalTableExtractionProvider } from "./providers/localPdfTableProvider";
 import { MistralTableExtractionProvider } from "./providers/mistralOcrProvider";
 import { evaluateQualityGate } from "./qualityGate";
+import {
+  checkCap,
+  isProviderDisabled,
+  CostCapExceededError,
+  type ApiProvider,
+} from "../researchBrain/costService";
+
+const MISTRAL_OCR_PROVIDER: ApiProvider = "mistral_ocr";
 
 // Re-export the prompt helper from the dedicated module so existing
 // callers (the bioprospecting extractor and tests) can keep importing
@@ -97,11 +105,22 @@ export interface ExtractedFigure {
  * Provider abstraction. Each provider knows how to walk a PDF buffer
  * and return detected tables (and optionally figures). The local
  * provider is in-process; the Mistral provider is HTTP.
+ *
+ * `ctx` carries the cross-cutting identifiers the orchestrator threads
+ * through: `runId` for `costService.recordApiCall` per-run cap and
+ * `sourceId` for per-source attribution. The local provider ignores
+ * the context.
  */
 export interface TableExtractionProvider {
   readonly name: "local" | "mistral";
-  extract(pdf: Uint8Array): Promise<ExtractedTable[]>;
-  extractFigures?(pdf: Uint8Array): Promise<ExtractedFigure[]>;
+  extract(
+    pdf: Uint8Array,
+    ctx?: { runId?: string; sourceId?: string },
+  ): Promise<ExtractedTable[]>;
+  extractFigures?(
+    pdf: Uint8Array,
+    ctx?: { runId?: string; sourceId?: string },
+  ): Promise<ExtractedFigure[]>;
 }
 
 export class TableExtractionProviderError extends Error {
@@ -505,10 +524,18 @@ export interface ExtractPDFTablesResult {
  * (`< 3` tables or `avg row confidence < 0.5`), Mistral is consulted
  * as a fallback. The local output is NOT persisted when fallback
  * fires (only the Mistral result is saved).
+ *
+ * `ctx.runId` / `ctx.sourceId` are threaded into the Mistral
+ * provider's cost-cap path so `costService.recordApiCall` can
+ * attribute spend. The orchestrator catches `CostCapExceededError`
+ * and transparently falls back to the local provider, persisting
+ * `extraction_provider='local'` with the `reason='cost_cap'` log
+ * event.
  */
 export async function extractPDFTables(
   sourceId: string,
   pdf: Uint8Array,
+  ctx?: { runId?: string; sourceId?: string },
 ): Promise<ExtractPDFTablesResult> {
   // 1. Cache check
   const existing = await loadTablesForSource(sourceId);
@@ -523,13 +550,14 @@ export async function extractPDFTables(
   const mode = resolveMode();
   const local = getLocalProvider();
   const mistral = getMistralProvider();
+  const providerCtx = { ...(ctx ?? {}), sourceId };
 
   // 2. Run local provider (or jump straight to Mistral if mode = "mistral")
   let localTables: ExtractedTable[] = [];
   let localError: unknown = null;
   if (mode === "auto" || mode === "local") {
     try {
-      localTables = await local.extract(pdf);
+      localTables = await local.extract(pdf, providerCtx);
     } catch (error) {
       localError = error;
       logger.warn(
@@ -576,11 +604,90 @@ export async function extractPDFTables(
   }
 
   // 4. Fallback to Mistral (only in `auto` mode when local failed the gate,
-  //    or in `mistral` mode when local was skipped)
+  //    or in `mistral` mode when local was skipped). The cost-cap path is
+  //    wrapped here so a cap hit transparently falls back to `local`.
   if (mode === "auto" || mode === "mistral") {
+    // 4a. Short-circuit on the `globalThis` disabled flags. The flag
+    //     is set by `recordApiCall` when the RPC returns cap_hit; we
+    //     respect it BEFORE calling `checkCap` again to avoid a
+    //     redundant round-trip.
+    if (isProviderDisabled(MISTRAL_OCR_PROVIDER)) {
+      logger.warn(
+        {
+          event: "mistral_disabled_today",
+          provider: "local",
+          reason: "cost_cap",
+          sourceId,
+          runId: providerCtx.runId,
+        },
+        "Mistral provider is process-disabled; falling back to local",
+      );
+      const persisted = await persistExtractedTables(
+        sourceId,
+        localTables,
+        "local",
+      );
+      return {
+        tables: persisted.map(rowToExtractedTable),
+        figures: [],
+        provider: "local",
+      };
+    }
+
+    // 4b. Pre-call cap check (read-only). Honors the globalThis flag
+    //     inside `checkCap` too, but we already short-circuited
+    //     above. This is a defense-in-depth pass.
+    const estimatedPages =
+      MistralTableExtractionProvider.estimatePages(pdf);
+    const estimatedCostUsd =
+      estimatedPages * MistralTableExtractionProvider.costPerPageUsd();
+    const pre = await checkCap({
+      provider: MISTRAL_OCR_PROVIDER,
+      estimatedCostUsd,
+      sourceId: providerCtx.sourceId,
+      runId: providerCtx.runId,
+    });
+    if (!pre.allowed) {
+      const scope = pre.wouldHitPerSource
+        ? "source"
+        : pre.wouldHitDaily
+          ? "day"
+          : pre.wouldHitMonthly
+            ? "month"
+            : "run";
+      logger.warn(
+        {
+          event:
+            scope === "month"
+              ? "mistral_disabled_this_month"
+              : "mistral_disabled_today",
+          provider: "local",
+          reason: "cost_cap",
+          scope,
+          sourceId,
+          runId: providerCtx.runId,
+        },
+        "Mistral pre-call cap check failed; falling back to local",
+      );
+      const persisted = await persistExtractedTables(
+        sourceId,
+        localTables,
+        "local",
+      );
+      return {
+        tables: persisted.map(rowToExtractedTable),
+        figures: [],
+        provider: "local",
+      };
+    }
+
+    // 4c. Run Mistral. The provider also performs its own pre-check
+    //     and post-call `recordApiCall`. A `CostCapExceededError` is
+    //     caught here and translated to the local fallback.
     try {
-      const mistralTables = await mistral.extract(pdf);
-      const mistralFigures = (await mistral.extractFigures?.(pdf)) ?? [];
+      const mistralTables = await mistral.extract(pdf, providerCtx);
+      const mistralFigures =
+        (await mistral.extractFigures?.(pdf, providerCtx)) ?? [];
       const persisted = await persistExtractedTables(
         sourceId,
         mistralTables,
@@ -596,11 +703,43 @@ export async function extractPDFTables(
         provider: "mistral",
       };
     } catch (error) {
+      // Cost-cap hit (pre or post): the provider already set the
+      // globalThis flag inside `recordApiCall` and logged
+      // `mistral_disabled_today` / `mistral_disabled_this_month`.
+      // We log the orchestrator-side fallback and persist local.
+      if (error instanceof CostCapExceededError) {
+        logger.warn(
+          {
+            event:
+              error.scope === "month"
+                ? "mistral_disabled_this_month"
+                : "mistral_disabled_today",
+            provider: "local",
+            reason: "cost_cap",
+            scope: error.scope,
+            sourceId,
+            runId: providerCtx.runId,
+          },
+          "Mistral CostCapExceededError caught by orchestrator; falling back to local",
+        );
+        const persisted = await persistExtractedTables(
+          sourceId,
+          localTables,
+          "local",
+        );
+        return {
+          tables: persisted.map(rowToExtractedTable),
+          figures: [],
+          provider: "local",
+        };
+      }
+
       logger.error(
         {
           err: error,
           sourceId,
-          localError: localError instanceof Error ? localError.message : null,
+          localError:
+            localError instanceof Error ? localError.message : null,
         },
         "pdf_table_extraction_mistral_failed",
       );

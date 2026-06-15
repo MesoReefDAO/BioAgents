@@ -97,7 +97,11 @@ export interface CostConfig {
 export class CostCapExceededError extends Error {
   readonly scope: CapScope;
   readonly provider: ApiProvider;
-  constructor(opts: { scope: CapScope; provider: ApiProvider; message?: string }) {
+  constructor(opts: {
+    scope: CapScope;
+    provider: ApiProvider;
+    message?: string;
+  }) {
     super(
       opts.message ??
         `Cost cap exceeded for ${opts.provider} (scope=${opts.scope})`,
@@ -136,10 +140,7 @@ function readEnvBool(name: string, fallback: boolean): boolean {
 
 export function getCostConfig(): CostConfig {
   return {
-    mistralOcrDailyCapUsd: readEnvNumber(
-      "MISTRAL_OCR_DAILY_COST_CAP_USD",
-      50,
-    ),
+    mistralOcrDailyCapUsd: readEnvNumber("MISTRAL_OCR_DAILY_COST_CAP_USD", 50),
     mistralOcrMonthlyCapUsd: readEnvNumber(
       "MISTRAL_OCR_MONTHLY_COST_CAP_USD",
       1000,
@@ -148,10 +149,7 @@ export function getCostConfig(): CostConfig {
       "MISTRAL_OCR_PER_SOURCE_COST_CAP_USD",
       2,
     ),
-    pubchemDailyRequestCap: readEnvNumber(
-      "PUBCHEM_DAILY_REQUEST_CAP",
-      200_000,
-    ),
+    pubchemDailyRequestCap: readEnvNumber("PUBCHEM_DAILY_REQUEST_CAP", 200_000),
     costAlertHardBlock: readEnvBool("COST_ALERT_HARD_BLOCK", true),
     costAlertSoftThreshold: readEnvNumber("COST_ALERT_SOFT_THRESHOLD", 0.8),
     mistralOcrEnabled: readEnvBool("MISTRAL_OCR_ENABLED", true),
@@ -380,12 +378,31 @@ export async function recordApiCall(
  * For pubchem, the `estimatedCostUsd` is ignored — the cap is
  * units-based (PUBCHEM_DAILY_REQUEST_CAP) and we compare against
  * `units` (default 1 for a single call).
+ *
+ * Hard-block override (WARNING #3 fix):
+ *   When `COST_ALERT_HARD_BLOCK=false` AND the cap math says we
+ *   would hit, `checkCap` returns `allowed: true` (with the
+ *   individual `wouldHit*` flags still set to true so the caller
+ *   knows the cap was crossed). The RPC still increments the
+ *   counters and the dashboard still shows the overage — only the
+ *   hard-block decision is suppressed. A
+ *   `cost_alert_hard_block_disabled` log event is emitted so
+ *   operators can see when the override is in effect.
+ *
+ * The provider-disabled flag (`globalThis.__<provider>Disabled__`)
+ * is a separate, process-local latching mechanism set by a
+ * previous RPC call returning `cap_hit='day'|'month'`. It is NOT
+ * affected by `COST_ALERT_HARD_BLOCK` — that flag exists so a
+ *   day-cap hit in one process propagates the disable to the rest
+ *   of the process. The env override is a "soft mode" override of
+ *   the cap MATH, not of the latched flag.
  */
 export async function checkCap(input: CheckCapInput): Promise<CheckCapResult> {
   const caps = getActiveCaps(input.provider);
 
   // Short-circuit when the provider is already disabled for the
-  // day or month.
+  // day or month. The latched flag is a process-local kill switch;
+  // COST_ALERT_HARD_BLOCK does NOT override it.
   if (isProviderDisabled(input.provider)) {
     return {
       allowed: false,
@@ -405,10 +422,47 @@ export async function checkCap(input: CheckCapInput): Promise<CheckCapResult> {
     caps.monthly > 0 && input.estimatedCostUsd >= caps.monthly;
   const wouldHitPerSource =
     caps.perSource > 0 && input.estimatedCostUsd >= caps.perSource;
-  const wouldHitPerRun = caps.perRun > 0 && input.estimatedCostUsd >= caps.perRun;
+  const wouldHitPerRun =
+    caps.perRun > 0 && input.estimatedCostUsd >= caps.perRun;
+
+  const wouldHitAny =
+    wouldHitDaily || wouldHitMonthly || wouldHitPerSource || wouldHitPerRun;
+
+  // Hard-block override: when COST_ALERT_HARD_BLOCK=false, the cap
+  // math still runs (so the wouldHit* flags stay truthful) but the
+  // allowed decision is always true. The counter still goes up
+  // (recordApiCall is called regardless) so the dashboard still
+  // surfaces the overage. A structured log event is emitted here so
+  // operators can audit when the override is in effect.
+  if (wouldHitAny) {
+    const cfg = getCostConfig();
+    if (!cfg.costAlertHardBlock) {
+      logger.warn(
+        {
+          event: "cost_alert_hard_block_disabled",
+          provider: input.provider,
+          estimatedCostUsd: input.estimatedCostUsd,
+          units: input.units,
+          wouldHitDaily,
+          wouldHitMonthly,
+          wouldHitPerSource,
+          wouldHitPerRun,
+          softThreshold: cfg.costAlertSoftThreshold,
+        },
+        "COST_ALERT_HARD_BLOCK=false: cap hit ignored; allowing call",
+      );
+      return {
+        allowed: true,
+        wouldHitDaily,
+        wouldHitMonthly,
+        wouldHitPerSource,
+        wouldHitPerRun,
+      };
+    }
+  }
 
   return {
-    allowed: !(wouldHitDaily || wouldHitMonthly || wouldHitPerSource || wouldHitPerRun),
+    allowed: !wouldHitAny,
     wouldHitDaily,
     wouldHitMonthly,
     wouldHitPerSource,
@@ -494,8 +548,11 @@ export async function getPerSourceTotals(
     let totalUsd = 0;
     let callCount = 0;
     for (const row of data ?? []) {
-      const calls = (row as { ext_api_calls?: Record<string, { costUsd?: number; calls?: number }> })
-        .ext_api_calls;
+      const calls = (
+        row as {
+          ext_api_calls?: Record<string, { costUsd?: number; calls?: number }>;
+        }
+      ).ext_api_calls;
       if (!calls) continue;
       for (const entry of Object.values(calls)) {
         totalUsd += Number(entry.costUsd ?? 0);
@@ -543,7 +600,8 @@ export async function getCurrentSpend(input: {
       .gte("day", cutoff);
     if (error) return 0;
     return (data ?? []).reduce(
-      (sum: number, row) => sum + Number((row as { cost_usd?: number }).cost_usd ?? 0),
+      (sum: number, row) =>
+        sum + Number((row as { cost_usd?: number }).cost_usd ?? 0),
       0,
     );
   } catch {
@@ -598,7 +656,8 @@ export async function getMonthUsage(
       .gte("day", cutoff);
     if (error) return { costUsd: 0 };
     const costUsd = (data ?? []).reduce(
-      (sum: number, row) => sum + Number((row as { cost_usd?: number }).cost_usd ?? 0),
+      (sum: number, row) =>
+        sum + Number((row as { cost_usd?: number }).cost_usd ?? 0),
       0,
     );
     return { costUsd };
@@ -677,7 +736,10 @@ export function notifyApiCallDelta(
   const cache = getRunApiSpendCache();
   const prior = cache.get(runId) ?? { apiCost: 0, apiCallsCount: 0 };
   const next: RunApiSpendSnapshot = {
-    apiCost: Math.max(0, prior.apiCost + (Number.isFinite(deltaCost) ? deltaCost : 0)),
+    apiCost: Math.max(
+      0,
+      prior.apiCost + (Number.isFinite(deltaCost) ? deltaCost : 0),
+    ),
     apiCallsCount: Math.max(
       0,
       prior.apiCallsCount + (Number.isFinite(deltaCalls) ? deltaCalls : 0),

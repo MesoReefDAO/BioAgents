@@ -32,14 +32,7 @@
  *  22. `CostCapExceededError` carries `scope` and `provider`
  */
 
-import {
-  describe,
-  it,
-  expect,
-  beforeEach,
-  afterEach,
-  mock,
-} from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 
 // ---------------------------------------------------------------------------
 // Env mutation helpers — restore the previous value in afterEach so
@@ -94,9 +87,7 @@ declare global {
   // eslint-disable-next-line no-var
   var __costServiceTestRpc: ((...args: unknown[]) => unknown) | undefined;
   // eslint-disable-next-line no-var
-  var __costServiceTestFrom:
-    | ((...args: unknown[]) => unknown)
-    | undefined;
+  var __costServiceTestFrom: ((...args: unknown[]) => unknown) | undefined;
 }
 
 function setMockRpc(fn: (...args: unknown[]) => unknown) {
@@ -310,6 +301,46 @@ describe("costService — checkCap (cap math)", () => {
     expect(result.allowed).toBe(false);
     expect(result.wouldHitDaily).toBe(true);
     expect(result.wouldHitMonthly).toBe(true);
+  });
+
+  it("COST_ALERT_HARD_BLOCK=false allows over-cap calls (allowed=true with wouldHit* flags set)", async () => {
+    // WARNING #3 fix: when the env override is set, the cap math
+    // still runs (wouldHit* flags stay truthful) but the allowed
+    // decision flips to true. The counter still goes up via
+    // recordApiCall, so the dashboard still sees the overage.
+    process.env.MISTRAL_OCR_DAILY_COST_CAP_USD = "50";
+    process.env.COST_ALERT_HARD_BLOCK = "false";
+    const result = await checkCap({
+      provider: "mistral_ocr",
+      estimatedCostUsd: 60, // > 50 daily cap
+    });
+    expect(result.allowed).toBe(true);
+    expect(result.wouldHitDaily).toBe(true);
+  });
+
+  it("COST_ALERT_HARD_BLOCK=true (default) keeps hard-block behavior", async () => {
+    process.env.MISTRAL_OCR_DAILY_COST_CAP_USD = "50";
+    process.env.COST_ALERT_HARD_BLOCK = "true";
+    const result = await checkCap({
+      provider: "mistral_ocr",
+      estimatedCostUsd: 60,
+    });
+    expect(result.allowed).toBe(false);
+    expect(result.wouldHitDaily).toBe(true);
+  });
+
+  it("COST_ALERT_HARD_BLOCK=false does NOT override the latched provider-disabled flag", async () => {
+    // The latched flag is a separate process-local kill switch.
+    // COST_ALERT_HARD_BLOCK is a soft-mode override of the cap
+    // math, not of the latched disable. Once the flag is set,
+    // checkCap returns allowed=false regardless of the env.
+    process.env.COST_ALERT_HARD_BLOCK = "false";
+    disableProviderToday("mistral_ocr", "test");
+    const result = await checkCap({
+      provider: "mistral_ocr",
+      estimatedCostUsd: 0.01,
+    });
+    expect(result.allowed).toBe(false);
   });
 });
 

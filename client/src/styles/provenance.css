@@ -10,15 +10,25 @@
   transition: opacity 120ms ease-out;
 }
 .provenance-bbox--table {
-  border: 2px solid #3b82f6;          /* blue */
+  border: 2px solid #3b82f6; /* blue */
   background: rgba(59, 130, 246, 0.15);
 }
 .provenance-bbox--figure {
-  border: 2px solid #a855f7;          /* purple */
+  border: 2px solid #a855f7; /* purple */
   background: rgba(168, 85, 247, 0.15);
 }
+/* PR #2 of figure-image-extraction: green border for figures
+   that have an extracted image in S3. The split (green with
+   image, purple bbox-only) is a screen signal that the user
+   can preview / download the image. The `data-provenance-
+   figure-status` attribute on the div carries the same status
+   for E2E selectors. */
+.provenance-bbox--figure-with-image {
+  border: 2px solid #10b981; /* emerald-500 (green) */
+  background: rgba(16, 185, 129, 0.15);
+}
 .provenance-bbox--chunk {
-  border: 2px solid #eab308;          /* yellow */
+  border: 2px solid #eab308; /* yellow */
   background: rgba(234, 179, 8, 0.2);
 }
 
@@ -270,11 +280,55 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  color: #a1a1a1;
+  color: #a1a1aa;
   padding: 24px;
 }
 .evidence-lightbox__error {
   color: #f87171;
+}
+
+/* ---- PR #2 of figure-image-extraction ----
+   Figure index tag (e.g. "Figure 2 (page 4)") rendered next to
+   the "Fact {id}" subtitle. Inline span, separated by a middle
+   dot. Visible regardless of imageUrl presence. */
+.evidence-lightbox__figure-tag {
+  color: #6ee7b7; /* emerald-300 — matches the green bbox */
+  font-weight: 500;
+  margin-left: 4px;
+}
+
+/* Image header rendered above the PDF viewer when the figure
+   has an `imageUrl`. Centered, full width with vertical
+   padding; the optional caption sits flush below the image. */
+.evidence-lightbox__figure-preview {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 16px 24px 8px;
+  background: rgba(0, 0, 0, 0.25);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+.evidence-lightbox__figure-imagewrap {
+  display: inline-block;
+  max-width: 100%;
+  background: #fff;
+  border-radius: 4px;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.45);
+  overflow: hidden;
+}
+.evidence-lightbox__figure-image {
+  display: block;
+  max-width: 100%;
+  height: auto;
+}
+.evidence-lightbox__figure-caption {
+  font-size: 12px;
+  color: #d1d5db;
+  text-align: center;
+  max-width: 80%;
+  line-height: 1.4;
 }
 
 /* ---- Dedicated viewer route ---- */

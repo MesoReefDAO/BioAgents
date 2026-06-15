@@ -8,7 +8,7 @@
  */
 import { useCallback, useEffect, useState } from "preact/hooks";
 
-import { PDFJS_RENDER_SCALE, BBox } from "../lib/bbox";
+import { BBox, PDFJS_RENDER_SCALE } from "../lib/bbox";
 
 export type ProvenanceType = "table" | "figure" | "chunk" | "text-only";
 
@@ -30,6 +30,20 @@ export interface ProvenanceFigure {
   figureIndex: number;
   bbox: BBox;
   caption: string | null;
+  /**
+   * PR #2 of figure-image-extraction: the four image fields are
+   * populated by the `/evidence` endpoint when the figure has an
+   * extracted image in S3 (storage_path IS NOT NULL). When the
+   * figure is bbox-only, all four are undefined and the lightbox
+   * degrades to the pre-change purple-bbox behavior. The
+   * `/facts/:id/provenance` endpoint does not currently surface
+   * these (the design's open question #2 defers that to a later
+   * change); the lightbox therefore tolerates their absence.
+   */
+  imageUrl?: string;
+  width?: number;
+  height?: number;
+  mimeType?: string;
 }
 
 export interface ProvenanceChunk {
@@ -120,9 +134,12 @@ export function useProvenance(factId: string | null) {
           credentials: "include",
         },
       );
-      const json = (await res.json().catch(() => ({}))) as Partial<
-        ProvenanceResponse
-      > & { error?: string; message?: string };
+      const json = (await res
+        .json()
+        .catch(() => ({}))) as Partial<ProvenanceResponse> & {
+        error?: string;
+        message?: string;
+      };
       if (!res.ok) {
         throw new Error(
           json?.message || json?.error || "Failed to load provenance",
@@ -178,9 +195,10 @@ export function parseViewerHash(hash: string): HashState {
     }
   }
 
-  const page = pageRaw && Number.isFinite(Number(pageRaw))
-    ? Math.max(1, Number(pageRaw))
-    : 1;
+  const page =
+    pageRaw && Number.isFinite(Number(pageRaw))
+      ? Math.max(1, Number(pageRaw))
+      : 1;
 
   const type: ProvenanceType =
     typeRaw === "table" ||

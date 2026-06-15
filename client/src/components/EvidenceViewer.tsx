@@ -18,14 +18,14 @@
  */
 import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 
-import { BboxOverlay } from "./BboxOverlay";
-import { PDFJS_RENDER_SCALE, BBox } from "../lib/bbox";
 import {
+  HashState,
   parseViewerHash,
   ProvenanceType,
-  HashState,
 } from "../hooks/useProvenance";
+import { BBox, PDFJS_RENDER_SCALE } from "../lib/bbox";
 import { type PdfDocumentProxy, type PdfPageProxy } from "../lib/pdfjs";
+import { BboxOverlay } from "./BboxOverlay";
 
 interface EvidenceViewerProps {
   doc: PdfDocumentProxy | null;
@@ -37,6 +37,13 @@ interface EvidenceViewerProps {
   bbox?: BBox | null;
   type?: ProvenanceType;
   page?: number;
+  // PR #2 of figure-image-extraction: when the figure has an
+  // extracted image, the lightbox passes the proxy URL so the
+  // bbox can switch from purple (bbox-only) to green
+  // (with-image). Tables and chunks ignore this. Optional —
+  // when undefined the pre-change purple class applies for
+  // figures.
+  imageUrl?: string;
   // Called when the URL hash is the source of truth (dedicated
   // route). The parent can use this to set `window.location.hash`.
   onHashChange?: (state: HashState) => void;
@@ -50,6 +57,7 @@ export function EvidenceViewer({
   bbox: bboxProp,
   type: typeProp,
   page: pageProp,
+  imageUrl: imageUrlProp,
   onHashChange,
 }: EvidenceViewerProps) {
   const [pageNumber, setPageNumber] = useState<number>(1);
@@ -157,8 +165,7 @@ export function EvidenceViewer({
             item.transform[3] || 0,
           );
           const x = item.transform[4] * PDFJS_RENDER_SCALE;
-          const yTop =
-            viewport.height - item.transform[5] * PDFJS_RENDER_SCALE;
+          const yTop = viewport.height - item.transform[5] * PDFJS_RENDER_SCALE;
           span.style.position = "absolute";
           span.style.left = `${x}px`;
           span.style.top = `${yTop - fontHeight * PDFJS_RENDER_SCALE}px`;
@@ -259,7 +266,12 @@ export function EvidenceViewer({
           aria-hidden="false"
         />
         {showBbox ? (
-          <BboxOverlay bbox={bbox} type={type} className="provenance-viewer__overlay" />
+          <BboxOverlay
+            bbox={bbox}
+            type={type}
+            imageUrl={imageUrlProp}
+            className="provenance-viewer__overlay"
+          />
         ) : null}
       </div>
     </div>

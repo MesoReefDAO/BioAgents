@@ -15,6 +15,7 @@ import { deepResearchStartRoute } from "./routes/deep-research/start";
 import { deepResearchStatusRoute } from "./routes/deep-research/status";
 import { deepResearchPaperRoute } from "./routes/deep-research/paper";
 import { deepResearchBranchRoute } from "./routes/deep-research/branch";
+import { deepResearchDiscoveriesRoute } from "./routes/deep-research/discoveries";
 import { filesRoute } from "./routes/files";
 import { x402Route } from "./routes/x402";
 import { x402ChatRoute } from "./routes/x402/chat";
@@ -321,6 +322,7 @@ const app = new Elysia()
   .use(deepResearchStatusRoute) // GET /api/deep-research/status/:messageId to check status
   .use(deepResearchBranchRoute) // POST /api/deep-research/branch to fork a conversation with copied state
   .use(deepResearchPaperRoute) // POST /api/deep-research/conversations/:conversationId/paper for paper generation
+  .use(deepResearchDiscoveriesRoute) // GET /api/deep-research/conversations/:conversationId/discoveries (discovery-persistence v1, PR #2)
   .use(artifactsRoute) // GET /api/artifacts/download for artifact downloads
   .use(libraryRoute) // GET/POST /api/library/* for paper library + per-paper Q&A
   .use(researchBrainRoute) // GET/POST /api/research-brain/* for evidence-first Research Brain

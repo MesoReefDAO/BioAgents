@@ -64,32 +64,32 @@ Chain strategy: stacked-to-main
 
 ### Phase 2.1: Read Endpoint
 
-- [ ] 2.1.1 Create `src/routes/deep-research/discoveries.ts` per `design.md` §8.1: Elysia guard `authResolver({ required: true })`, `GET /conversations/:conversationId/discoveries`. 401/400/404/500/200 paths. Returns `{ discoveries: [...] }` with `evidence[] = []` per row (v1 limit).
-- [ ] 2.1.2 In `src/index.ts`, add import after `deepResearchBranchRoute` and `.use(deepResearchDiscoveriesRoute)` after `.use(deepResearchPaperRoute)` (line ~323).
-- [ ] 2.1.3 Document `evidence_archived` not-populated in v1 in the route's header comment.
+- [x] 2.1.1 Create `src/routes/deep-research/discoveries.ts` per `design.md` §8.1: Elysia guard `authResolver({ required: true })`, `GET /conversations/:conversationId/discoveries`. 401/400/404/500/200 paths. Returns `{ discoveries: [...] }` with `evidence[] = []` per row (v1 limit).
+- [x] 2.1.2 In `src/index.ts`, add import after `deepResearchBranchRoute` and `.use(deepResearchDiscoveriesRoute)` after `.use(deepResearchPaperRoute)` (line ~323).
+- [x] 2.1.3 Document `evidence_archived` not-populated in v1 in the route's header comment.
 
 ### Phase 2.2: Match Algorithm Tests
 
-- [ ] 2.2.1 Create `src/agents/discovery/__tests__/utils.test.ts`. Cover per `design.md` §10.1: `normalizeTokens` (basic, diacritics, short tokens, punctuation), `jaccard` (identical, disjoint, partial, empty cases), `discoveryStableKey` (determinism, sorted), `findMatchingDiscovery` (high-sim, low-sim null, empty existing, tie-break, parameterizable threshold).
+- [x] 2.2.1 Create `src/agents/discovery/__tests__/utils.test.ts`. Cover per `design.md` §10.1: `normalizeTokens` (basic, diacritics, short tokens, punctuation), `jaccard` (identical, disjoint, partial, empty cases), `discoveryStableKey` (determinism, sorted), `findMatchingDiscovery` (high-sim, low-sim null, empty existing, tie-break, parameterizable threshold).
 
 ### Phase 2.3: Service Module Tests
 
-- [ ] 2.3.1 Create `src/services/researchBrain/__tests__/discoveryPersistence.test.ts`. Use `scriptedMock` + `setMockServiceClient` + `mock.module("../../../db/client", ...)` from `compoundAuthority.test.ts:78-143`. Cover §10.2: happy, supersede + evidence merge, no-match, removed, load-fail, insert-fail, all-fail; `getDiscoveriesForConversation` happy / empty / only-current.
-- [ ] 2.3.2 Import SUT via `../discoveryPersistence` (relative, matches `compoundAuthority.test.ts:146-159`).
+- [x] 2.3.1 Create `src/services/researchBrain/__tests__/discoveryPersistence.test.ts`. Use `scriptedMock` + `setMockServiceClient` + `mock.module("../../../db/client", ...)` from `compoundAuthority.test.ts:78-143`. Cover §10.2: happy, supersede + evidence merge, no-match, removed, load-fail, insert-fail, all-fail; `getDiscoveriesForConversation` happy / empty / only-current.
+- [x] 2.3.2 Import SUT via `../discoveryPersistence` (relative, matches `compoundAuthority.test.ts:146-159`).
 
 ### Phase 2.4: Route Tests
 
-- [ ] 2.4.1 Create `src/routes/deep-research/__tests__/discoveries.test.ts`. Mock `getServiceClient`, `getConversation`, `getDiscoveriesForConversation`. Cover §10.3: 200 happy (2 rows), 401 no auth, 404 unknown, 404 unowned, 500 DB fail, 200 empty.
+- [x] 2.4.1 Create `src/routes/deep-research/__tests__/discoveries.test.ts`. Mock `getServiceClient`, `getConversation`, `getDiscoveriesForConversation`. Cover §10.3: 200 happy (2 rows), 401 no auth, 404 unknown, 404 unowned, 500 DB fail, 200 empty.
 
 ### Phase 2.5: Agent Smoke Test
 
-- [ ] 2.5.1 Create `src/agents/discovery/__tests__/index.test.ts`. Mock `extractDiscoveries`, spy on `persistDiscoveriesToDb` via module mock. Assert: (a) spy called with right args + `threshold=0.7`, (b) spy throw does not break agent's return, (c) return's `discoveries` is post-`fixDiscoveryArtifactPaths`.
+- [x] 2.5.1 Create `src/agents/discovery/__tests__/index.test.ts`. Mock `extractDiscoveries`, spy on `persistDiscoveriesToDb` via module mock. Assert: (a) spy called with right args + `threshold=0.7`, (b) spy throw does not break agent's return, (c) return's `discoveries` is post-`fixDiscoveryArtifactPaths`.
 
 ### PR #2 Verification
 
-- [ ] 2.6.1 `bun test` for all new test files passes.
-- [ ] 2.6.2 `bun run build` passes.
-- [ ] 2.6.3 `curl -H "Authorization: Bearer $JWT" .../discoveries` returns 200/401/404 as expected.
+- [x] 2.6.1 `bun test` for all new test files passes.
+- [x] 2.6.2 `bun run build` passes.
+- [x] 2.6.3 `curl -H "Authorization: Bearer $JWT" .../discoveries` returns 200/401/404 as expected.
 
 ---
 

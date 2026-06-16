@@ -547,6 +547,27 @@ bun run build:client
 
 The app will be available at `http://localhost:3000`
 
+### Version Metadata
+
+Every build injects the current version into both the backend and the frontend:
+
+- **Backend** exposes `GET /api/version` (no auth) returning `{ version, sha, buildDate }`
+- **Frontend Footer** shows `BioAgents v0.1.0 · abc1234 · 2026-06-16` at the bottom of the app
+- The Footer fetches `/api/version` on load and falls back to build-time values if the server is unreachable
+- If the bundled and server versions differ, the Footer shows a "⚠ version mismatch" badge
+
+**For local dev** (no Docker): `client/build.ts` reads `package.json` and `git rev-parse --short HEAD` at build time automatically.
+
+**For Docker rebuilds**: the `redeploy` script auto-injects `GIT_SHA` and `BUILD_DATE` as compose args:
+
+```bash
+bun run redeploy
+# = GIT_SHA=$(git rev-parse --short HEAD) BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
+#   docker compose build bioagents && docker compose up -d --force-recreate bioagents
+```
+
+To bump the version, edit the `"version"` field in `package.json` and rebuild.
+
 ---
 
 ## UI Development

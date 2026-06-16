@@ -51,10 +51,18 @@ ARG SUPABASE_URL
 ARG SUPABASE_ANON_KEY
 ARG PRIVY_APP_ID
 ARG CORALGPT_HERO_VIDEO_URL
+
+# Build metadata for /api/version + Footer. GIT_SHA is auto-injected by the
+# compose build args (or set to "unknown" if you build the image directly).
+ARG GIT_SHA=unknown
+ARG BUILD_DATE
+
 ENV SUPABASE_URL=${SUPABASE_URL}
 ENV SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY}
 ENV PRIVY_APP_ID=${PRIVY_APP_ID}
 ENV CORALGPT_HERO_VIDEO_URL=${CORALGPT_HERO_VIDEO_URL}
+ENV GIT_SHA=${GIT_SHA}
+ENV BUILD_DATE=${BUILD_DATE}
 
 # Build the client
 RUN cd client && bun run build

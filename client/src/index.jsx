@@ -9,6 +9,7 @@ import { AuthProvider } from './contexts';
 import { ProvenanceProvider } from './contexts/ProvenanceContext';
 import { LoginPage, ChatPage, LandingPage, AccessPendingPage, LibraryPage, PaperPage, ResearchBrainPage, CorpusDashboardPage, AdminPage, ViewerPage, LibraryViewerPage } from './pages';
 import { useAuth } from './hooks';
+import { Footer } from './components/Footer';
 import './styles/global.css';
 import './styles/coralgpt.css';
 import './styles/library.css';
@@ -78,6 +79,7 @@ function LegacyAppShell() {
       <AdminPage path="/admin" />
       <Redirect path="/" to="/chat" />
       <NotFound default redirectTo="/chat" />
+      <Footer />
     </Router>
   );
 }
@@ -125,6 +127,7 @@ function CoralAppShell() {
       <ResearchBrainPage path="/brain" coralGptMode />
       <AdminPage path="/admin" />
       <NotFound default redirectTo="/" />
+      <Footer />
     </Router>
   );
 }

@@ -35,6 +35,7 @@ import { waitlistRoute } from "./routes/waitlist";
 import { createQueueDashboard } from "./routes/admin/queue-dashboard";
 import { adminJobsRoute } from "./routes/admin/jobs";
 import { costTotalsRoute } from "./routes/admin/cost-totals";
+import { versionRoute } from "./routes/version";
 
 // ============================================================================
 // CORS Configuration - Security Critical
@@ -329,6 +330,7 @@ const app = new Elysia()
   .use(researchBrainGraphRoute) // GET /api/research-brain/graph/compounds/search for v1 knowledge graph (PR #1 of bioprospecting-knowledge-graph)
   .use(tableMergesRoute) // POST/DELETE/GET /api/research-brain/tables/* for admin table-merge overrides (PR #3 of bioprospecting-multipage-table-merge)
   .use(filesRoute) // POST /api/files/* for direct S3 file uploads
+  .use(versionRoute) // GET /api/version for build metadata (version, sha, buildDate)
 
   // x402 payment routes - Base (USDC)
   .use(x402Route) // GET /api/x402/* for config, pricing, payments, health

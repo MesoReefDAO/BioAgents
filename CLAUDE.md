@@ -298,6 +298,7 @@ B402_ENABLED=false         # BNB/USDT payments
 - `POST /api/deep-research/start` - Start deep research job
 - `GET /api/deep-research/status/:messageId` - Check job status
 - `GET /api/health` - Health check with queue status
+- `GET /api/version` - Build metadata (no auth): `{ version, sha, buildDate }`. Surfaces in the client Footer.
 
 ### Paper Generation
 

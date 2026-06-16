@@ -58,6 +58,8 @@ services:
         SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY}
         PRIVY_APP_ID: ${PRIVY_APP_ID:-}
         CORALGPT_HERO_VIDEO_URL: ${CORALGPT_HERO_VIDEO_URL:-}
+        GIT_SHA: ${GIT_SHA:-unknown}
+        BUILD_DATE: ${BUILD_DATE:-}
     container_name: bioagents-api
     expose:
       - "${PORT:-3000}"

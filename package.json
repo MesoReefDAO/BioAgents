@@ -1,5 +1,6 @@
 {
   "name": "bioagents-openai-agentkit",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
   "module": "index.ts",
@@ -16,7 +17,7 @@
     "normalize:taxonomy": "bun run scripts/normalize-taxonomy.ts",
     "normalize:compounds": "bun run scripts/normalize-compounds.ts",
     "seed:compounds": "bun run scripts/seed/load-compounds.ts",
-    "redeploy": "docker compose build bioagents && docker compose up -d --force-recreate bioagents",
+    "redeploy": "GIT_SHA=$(git rev-parse --short HEAD) BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ) docker compose build bioagents && docker compose up -d --force-recreate bioagents",
     "start": "bun src/index.ts",
     "worker": "bun src/worker.ts",
     "worker:dev": "bun --watch src/worker.ts"

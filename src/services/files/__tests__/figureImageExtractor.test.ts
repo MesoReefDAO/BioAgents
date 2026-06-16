@@ -61,10 +61,6 @@ import {
 
 declare global {
   // eslint-disable-next-line no-var
-  var __figureImgTestRecordApiCall:
-    | ((input: unknown) => Promise<unknown> | unknown)
-    | undefined;
-  // eslint-disable-next-line no-var
   var __figureImgTestRenderCropped:
     | ((pdf: Uint8Array, page: number, bbox: any, format: string) => Promise<any>)
     | undefined;
@@ -72,12 +68,6 @@ declare global {
   var __figureImgTestMistralEnabled: boolean | undefined;
   // eslint-disable-next-line no-var
   var __figureImgTestStorage: any;
-}
-
-function setRecordApiCall(
-  fn: (input: unknown) => Promise<unknown> | unknown,
-): void {
-  globalThis.__figureImgTestRecordApiCall = fn;
 }
 
 function setRenderCropped(
@@ -95,38 +85,12 @@ function setMockStorage(storage: any): void {
 }
 
 // ---------------------------------------------------------------------------
-// Module mocks (scoped to renderCrop + costService + storage + db.client)
+// Module mocks (scoped to renderCrop + storage + db.client). The
+// costService is the REAL module — we capture its `recordApiCall`
+// via the Supabase RPC hook below (see the special-case `rpc` handler
+// in the scripted mock). This avoids cross-file `mock.module`
+// pollution that would break tests like `costService.test.ts`.
 // ---------------------------------------------------------------------------
-
-mock.module("../../researchBrain/costService", () => {
-  return {
-    recordApiCall: async (input: unknown) => {
-      const fn = globalThis.__figureImgTestRecordApiCall;
-      if (fn) {
-        return await fn(input);
-      }
-      return {
-        capHit: null,
-        currentDailyCost: 0,
-        currentMonthlyCost: 0,
-        currentSourceCost: 0,
-        currentRunCost: 0,
-      };
-    },
-    checkCap: async () => ({ allowed: true }),
-    isProviderDisabled: () => false,
-    CostCapExceededError: class MockCostCapExceededError extends Error {
-      readonly scope: string;
-      readonly provider: string;
-      constructor(opts: { scope: string; provider: string }) {
-        super(`mock cost cap exceeded for ${opts.provider} (scope=${opts.scope})`);
-        this.name = "MockCostCapExceededError";
-        this.scope = opts.scope;
-        this.provider = opts.provider;
-      }
-    },
-  };
-});
 
 mock.module("../renderCrop", () => {
   return {
@@ -175,6 +139,11 @@ mock.module("../../../storage", () => {
 //   1. `loadFiguresForSource` (SELECT) — returns the row array
 //   2. For each row, an UPDATE on `research_evidence_figures`
 //      (echoes the payload back with the storage_path set)
+//   3. (Optionally) `recordApiCall` via the real costService — the
+//      `rpc("record_api_call", { p_*, ... })` call is captured and
+//      translated back to the original field names so the test can
+//      assert on provider/units/costUsd/metadata without polluting
+//      the costService module via `mock.module`.
 type Call = { method: string; args: unknown[] };
 type Terminal =
   | { kind: "single"; data: unknown; error: unknown }
@@ -191,6 +160,22 @@ const BUILDER_METHODS = [
   "order",
   "limit",
 ];
+
+// Per-test capture buffer for `record_api_call` RPC calls. The
+// `rpc` handler in `scriptedMock` translates Supabase RPC arg names
+// (e.g. `p_provider`, `p_units`, `p_cost_usd`, `p_metadata`) back to
+// the original `RecordApiCallInput` shape and pushes the result here
+// so the test can assert on provider/units/costUsd/metadata without
+// polluting the costService module via `mock.module`.
+//
+// Exposed at module scope (and reset in `beforeEach`) so individual
+// tests can read it the same way they read `recordApiCalls` before
+// the refactor.
+let capturedRecordApiCalls: unknown[] = [];
+
+function resetRecordApiCapture(): void {
+  capturedRecordApiCalls = [];
+}
 
 function scriptedMock(script: Terminal[], calls: Call[]) {
   let cursor = 0;
@@ -214,6 +199,45 @@ function scriptedMock(script: Terminal[], calls: Call[]) {
       return Promise.resolve({ data: t.data, error: t.error });
     };
   }
+  // Capture `record_api_call` RPC invocations. Supabase's `rpc`
+  // method returns a thenable (PostgREST contract), so we provide a
+  // `then` that resolves to a no-cap-hit shape. The costService
+  // normalizes the row and returns `capHit: null` so the orchestrator
+  // continues normally.
+  target.rpc = (name: string, args: Record<string, unknown> = {}) => {
+    calls.push({ method: "rpc", args: [name, args] });
+    if (name === "record_api_call") {
+      // Translate Supabase RPC arg names back to RecordApiCallInput
+      // fields. `p_metadata` is stored as-is.
+      const input = {
+        runId: args.p_run_id ?? undefined,
+        sourceId: args.p_source_id ?? undefined,
+        provider: args.p_provider as "mistral_ocr" | "pubchem",
+        units: args.p_units as number,
+        costUsd: args.p_cost_usd as number,
+        metadata: (args.p_metadata as Record<string, unknown>) ?? undefined,
+      };
+      capturedRecordApiCalls.push(input);
+    }
+    // Return a thenable that resolves to a no-cap-hit response so
+    // the real `recordApiCall` soft-succeeds.
+    return {
+      then: (onFulfilled: any, onRejected: any) => {
+        return Promise.resolve({
+          data: [
+            {
+              cap_hit: null,
+              current_daily_cost: 0,
+              current_monthly_cost: 0,
+              current_source_cost: 0,
+              current_run_cost: 0,
+            },
+          ],
+          error: null,
+        }).then(onFulfilled, onRejected);
+      },
+    };
+  };
   Object.defineProperty(target, "then", {
     get() {
       return (onFulfilled: any, onRejected: any) => {
@@ -293,6 +317,10 @@ const EMPTY_PDF = new Uint8Array();
 let calls: Call[];
 let client: any;
 let uploadCalls: Array<{ key: string; byteSize: number; mime: string }>;
+// `recordApiCalls` is the same buffer the test asserts on; the
+// Supabase RPC handler in `scriptedMock` pushes into it whenever
+// the real costService issues `record_api_call`. The
+// `resetRecordApiCapture()` call in `beforeEach` empties it.
 let recordApiCalls: unknown[];
 let renderCropCalls: Array<{ page: number; format: string }>;
 let updateCalls: Array<{ id: string; payload: any }>;
@@ -301,6 +329,7 @@ beforeEach(() => {
   calls = [];
   uploadCalls = [];
   recordApiCalls = [];
+  capturedRecordApiCalls = recordApiCalls;
   renderCropCalls = [];
   updateCalls = [];
   client = scriptedMock([], calls);
@@ -312,18 +341,6 @@ beforeEach(() => {
       uploadCalls.push({ key, byteSize: buffer.byteLength, mime });
       return key;
     },
-  });
-
-  // Default recordApiCall mock: capture inputs.
-  setRecordApiCall((input) => {
-    recordApiCalls.push(input);
-    return Promise.resolve({
-      capHit: null,
-      currentDailyCost: 0,
-      currentMonthlyCost: 0,
-      currentSourceCost: 0,
-      currentRunCost: 0,
-    });
   });
 
   // Default render-crop mock: record call + return a 1x1 PNG.
@@ -375,12 +392,12 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  setRecordApiCall(undefined);
   setRenderCropped(undefined as any);
   setMistralEnabled(undefined as any);
   setMockStorage(undefined as any);
   setMockServiceClient(undefined as any);
   delete (globalThis as any)[REAL_STORE_KEY];
+  resetRecordApiCapture();
 });
 
 // ---------------------------------------------------------------------------

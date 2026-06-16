@@ -354,6 +354,36 @@ describe("POST /api/research-brain/dedup/:factId/unmerge (admin)", () => {
     expect(res.status).toBe(409);
   });
 
+  it("returns 404 when the fact does not exist (Nonexistent fact returns 404)", async () => {
+    // Spec scenario: "Nonexistent fact returns 404". The
+    // `unmergeFact` service throws `FactNotFoundError` when its
+    // existence check on `research_bioprospecting_facts` returns no
+    // row; the route maps that error to 404.
+    client = scriptedMock(
+      [
+        // fact existence check returns null (no row)
+        { kind: "single", data: null, error: null },
+      ],
+      calls,
+    );
+    setMockServiceClient(() => client);
+
+    const res = await researchBrainRoute.handle(
+      new Request(
+        `http://test/api/research-brain/dedup/${FACT_ID}/unmerge`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${adminToken}`,
+          },
+          body: JSON.stringify({ reasonCode: "false_positive" }),
+        },
+      ),
+    );
+    expect(res.status).toBe(404);
+  });
+
   it("returns 400 on an invalid reasonCode", async () => {
     const res = await researchBrainRoute.handle(
       new Request(

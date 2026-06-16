@@ -123,6 +123,7 @@ function CoralAppShell() {
       <LibraryViewerPage path="/library/:docId/viewer" coralGptMode />
       <ViewerPage path="/viewer/:sourceId" coralGptMode />
       <ResearchBrainPage path="/brain" coralGptMode />
+      <AdminPage path="/admin" />
       <NotFound default redirectTo="/" />
     </Router>
   );

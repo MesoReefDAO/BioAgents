@@ -823,14 +823,18 @@ async function insertMergeEdges(
 
 /**
  * Read-only lineage helper. Given a list of fact ids, returns the subset
- * that have been merged into a canonical (i.e., appear as
- * `merged_fact_id` in `research_bioprospecting_fact_edges`).
+ * that have been merged into a canonical via an ACTIVE edge in
+ * `research_bioprospecting_fact_edges` (i.e., appear as `merged_fact_id`
+ * in a row where `is_active = true`).
  *
- * Backed by the `merged_into_fact_id` column on
- * `research_bioprospecting_facts` (denormalized cache, kept in sync by
- * the inline merge in `replaceBioprospectingFactsForSource`). The edge
- * table is the authoritative source of truth; this column lets the
- * lookup stay a single-table query.
+ * bioprospecting-review-ui: switched from the `merged_into_fact_id`
+ * cache column on `research_bioprospecting_facts` to the edge table
+ * because the cache is NOT cleared on unmerge (the soft-delete contract
+ * keeps the cache populated for the audit trail). Reading the edge
+ * table with `is_active = true` is the only way to make an unmerged
+ * fact invisible to the lineage query layer — see
+ * `bioprospecting-semantic-dedup` spec §"Lineage Helpers Filter On
+ * is_active".
  *
  * Read-only: no insert, update, or delete.
  */
@@ -840,13 +844,20 @@ export async function findMergedFactIds(
   const uniqueIds = Array.from(new Set(factIds.filter(Boolean)));
   if (uniqueIds.length === 0) return new Set();
 
+  // Read from the edge table — the authoritative source of truth for
+  // dedup lineage. The `eq("is_active", true)` filter is the contract
+  // from the spec: an unmerged edge is invisible to this helper.
   const { data, error } = await supabase
-    .from("research_bioprospecting_facts")
-    .select("id")
-    .in("id", uniqueIds)
-    .not("merged_into_fact_id", "is", null);
+    .from("research_bioprospecting_fact_edges")
+    .select("merged_fact_id")
+    .in("merged_fact_id", uniqueIds)
+    .eq("is_active", true);
   if (error) throw error;
-  return new Set(((data || []) as Array<{ id: string }>).map((r) => r.id));
+  return new Set(
+    ((data || []) as Array<{ merged_fact_id: string }>).map(
+      (r) => r.merged_fact_id,
+    ),
+  );
 }
 
 /**

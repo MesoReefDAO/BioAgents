@@ -283,12 +283,12 @@ describe("dedup — findMergedFactIds", () => {
     expect(fromCalls.length).toBe(0);
   });
 
-  it("returns the subset of input ids that have merged_into_fact_id set", async () => {
+  it("returns the subset of input ids that appear as merged_fact_id in an active edge", async () => {
     client = scriptedMock(
       [
         {
           kind: "many",
-          data: [{ id: "id-b" }, { id: "id-d" }],
+          data: [{ merged_fact_id: "id-b" }, { merged_fact_id: "id-d" }],
           error: null,
         },
       ],
@@ -313,6 +313,37 @@ describe("dedup — findMergedFactIds", () => {
     const inCall = calls.find((c) => c.method === "in");
     expect(inCall).toBeDefined();
     expect(inCall!.args[1]).toEqual(["id-a", "id-b"]);
+  });
+
+  it("applies the is_active = true filter on the edge read", async () => {
+    // bioprospecting-review-ui contract: an unmerged edge is invisible
+    // to the lineage query layer. The helper reads the edge table
+    // (the authoritative source of truth) with the `is_active = true`
+    // filter; the `merged_into_fact_id` cache on the fact row is NOT
+    // consulted because that cache is preserved on unmerge (audit
+    // trail contract).
+    client = scriptedMock(
+      [
+        {
+          kind: "many",
+          data: [{ merged_fact_id: "id-d" }],
+          error: null,
+        },
+      ],
+      calls,
+    );
+    setMockServiceClient(() => client);
+    const result = await findMergedFactIds(["id-a", "id-b", "id-c", "id-d"]);
+    // The active filter must be in the call chain.
+    const activeEq = calls.find(
+      (c) => c.method === "eq" && c.args[0] === "is_active" && c.args[1] === true,
+    );
+    expect(activeEq).toBeDefined();
+    // And the unmerged ids (A, B, C) are NOT in the result.
+    expect(result.has("id-a")).toBe(false);
+    expect(result.has("id-b")).toBe(false);
+    expect(result.has("id-c")).toBe(false);
+    expect(result.has("id-d")).toBe(true);
   });
 });
 
@@ -683,34 +714,28 @@ describe("dedup — lineage helpers filter on is_active (bioprospecting-review-u
     expect(activeEq).toBeDefined();
   });
 
-  it("findMergedFactIds excludes unmerged facts", async () => {
-    // The `findMergedFactIds` helper reads from
-    // `research_bioprospecting_facts` and filters on
-    // `merged_into_fact_id IS NOT NULL`. The `is_active` filter is
-    // applied via the soft-delete read path: a fact whose edge was
-    // unmerged still has its `merged_into_fact_id` cache populated
-    // (the soft-delete doesn't clear it), so the helper must join
-    // the edges table to drop the unmerged fact from the result.
-    //
-    // The v1 implementation reads the cache column directly. The
-    // bioprospecting-review-ui delta adds a follow-up so the
-    // unmerged-fact case is invisible — this test asserts the
-    // current behavior (which the spec also documents: "the cache
-    // is intentionally kept; a future reconciliation job can clear
-    // stale rows"). Until the reconciliation job lands, the
-    // helper returns the cached ids.
-    //
-    // We still want the test to assert the contract: the result is
-    // a Set, and the helper does not throw.
+  it("findMergedFactIds excludes unmerged facts (spec scenario: Unmerged fact is not in findMergedFactIds)", async () => {
+    // Spec scenario: facts `[A, B, C, D]` where the edge for B was
+    // unmerged (so B is no longer a `merged_fact_id` in an active
+    // edge) and D is still merged. The expected result is `{D}` —
+    // NOT `{B, D}`. The helper reads the edge table with the
+    // `is_active = true` filter, so the unmerged B never enters the
+    // result set (even though B's fact row cache
+    // `merged_into_fact_id` is still populated — the soft-delete
+    // keeps it for the audit trail).
     client = scriptedMock(
       [
-        { kind: "many", data: [{ id: "id-b" }], error: null },
+        // The edge table returns D's row only (B's row is
+        // `is_active = false` and is dropped by the SQL filter, so
+        // it never reaches the helper's result set).
+        { kind: "many", data: [{ merged_fact_id: "id-d" }], error: null },
       ],
       calls,
     );
     setMockServiceClient(() => client);
-    const result = await findMergedFactIds(["id-a", "id-b", "id-c"]);
-    expect(result.has("id-b")).toBe(true);
-    expect(result.has("id-a")).toBe(false);
+    const result = await findMergedFactIds(["id-a", "id-b", "id-c", "id-d"]);
+    expect(result.has("id-d")).toBe(true);
+    expect(result.has("id-b")).toBe(false);
+    expect(result.size).toBe(1);
   });
 });

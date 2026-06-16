@@ -12,6 +12,7 @@ import { join, resolve } from 'path';
 const clientDir = import.meta.dir;
 const distDir = join(clientDir, 'dist');
 const isWatchMode = process.argv.includes('--watch');
+const noSourcemap = process.argv.includes('--no-sourcemap');
 
 // Load environment variables from parent directory's .env file
 const envPath = join(clientDir, '..', '.env');
@@ -62,7 +63,7 @@ async function build() {
     outdir: distDir,
     minify: !isWatchMode, // Don't minify in watch mode for faster builds
     target: 'browser',
-    sourcemap: 'external',
+    sourcemap: noSourcemap ? 'none' : 'external',
     splitting: false, // Disable code splitting to avoid chunk files the server doesn't handle
     define: {
       'process.env.SUPABASE_URL': JSON.stringify(process.env.SUPABASE_URL || ''),

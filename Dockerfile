@@ -64,8 +64,8 @@ ENV CORALGPT_HERO_VIDEO_URL=${CORALGPT_HERO_VIDEO_URL}
 ENV GIT_SHA=${GIT_SHA}
 ENV BUILD_DATE=${BUILD_DATE}
 
-# Build the client
-RUN cd client && bun run build
+# Build the client (--no-sourcemap avoids Permission denied on dist/ when re-running)
+RUN cd client && bun run build -- --no-sourcemap
 
 # Remove dev dependencies after build
 RUN bun install --production

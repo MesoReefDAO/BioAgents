@@ -39,15 +39,29 @@ describe("contradictionLlM — LLM detection logic unit tests", () => {
     function extractJsonArray(text: string): any[] {
       const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
       const candidate = (fenced?.[1] || text) as string;
-      const start = candidate.indexOf("[");
-      const end = candidate.lastIndexOf("]");
-      if (start === -1 || end === -1 || end <= start) return [];
-      try {
-        const parsed = JSON.parse(candidate.slice(start, end + 1));
-        return Array.isArray(parsed) ? parsed : [];
-      } catch {
-        return [];
+      // Walk from the end: for each ']', find the matching '[' and try to parse.
+      // This handles inputs with multiple concatenated arrays (e.g. "[1,2,3][4,5,6]")
+      // by always returning the LAST well-formed array.
+      for (let end = candidate.lastIndexOf("]"); end > 0; end = candidate.lastIndexOf("]", end - 1)) {
+        let depth = 0;
+        for (let start = end; start >= 0; start--) {
+          const ch = candidate[start];
+          if (ch === "]") depth++;
+          else if (ch === "[") {
+            depth--;
+            if (depth === 0) {
+              try {
+                const parsed = JSON.parse(candidate.slice(start, end + 1));
+                if (Array.isArray(parsed)) return parsed;
+              } catch {
+                // try the previous closing bracket
+              }
+              break;
+            }
+          }
+        }
       }
+      return [];
     }
 
     it("should parse fenced JSON array", () => {

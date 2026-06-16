@@ -867,10 +867,16 @@ export async function getDuplicateGroup(factId: string): Promise<{
   if (!factId) return null;
 
   // Touch the edge table to detect group membership cheaply.
+  // bioprospecting-review-ui: filter on `is_active = true` so a
+  // previously-unmerged edge is invisible to the lineage query
+  // layer. The unmerge sets the flag to `false`; the soft-delete
+  // contract (see design.md §"Soft-delete edge rows") is "is_active
+  // = false" only.
   const { data: edges, error: edgesError } = await supabase
     .from("research_bioprospecting_fact_edges")
     .select("canonical_fact_id, merged_fact_id")
     .or(`canonical_fact_id.eq.${factId},merged_fact_id.eq.${factId}`)
+    .eq("is_active", true)
     .limit(1);
   if (edgesError) throw edgesError;
   if (!edges || edges.length === 0) return null;

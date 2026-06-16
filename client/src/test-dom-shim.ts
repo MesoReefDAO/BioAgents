@@ -116,11 +116,57 @@ const existingDoc: any = (globalThis as any).document;
 if (!existingDoc || typeof existingDoc.createElement !== "function") {
   const fakeDoc = new FakeDocument();
   (globalThis as any).document = fakeDoc;
+  // The `route()` helper from preact-router mutates
+  // `window.location` (assigns to `.pathname` and calls
+  // `window.history.pushState`). The shim provides a mutable
+  // `location` object and a no-op `history` so the helper
+  // doesn't throw inside a hook's effect.
+  const fakeLocation: any = {
+    hash: "",
+    pathname: "/",
+    search: "",
+    href: "http://localhost/",
+    assign() {},
+    replace() {},
+  };
   (globalThis as any).window = (globalThis as any).window ?? {
     document: fakeDoc,
     addEventListener() {},
     removeEventListener() {},
     dispatchEvent() { return true; },
-    location: { hash: "" },
+    location: fakeLocation,
+    history: {
+      pushState() {},
+      replaceState() {},
+      go() {},
+      back() {},
+    },
+  };
+}
+
+// Polyfill `localStorage` for hook tests that read the JWT from it
+// (useAdmin, useAdminReview). The shim is a small key/value store
+// backed by a Map — no quota, no eviction.
+if (typeof (globalThis as any).localStorage === "undefined") {
+  const store = new Map<string, string>();
+  (globalThis as any).localStorage = {
+    getItem(key: string) {
+      return store.has(key) ? store.get(key)! : null;
+    },
+    setItem(key: string, value: string) {
+      store.set(key, String(value));
+    },
+    removeItem(key: string) {
+      store.delete(key);
+    },
+    clear() {
+      store.clear();
+    },
+    key(i: number) {
+      return Array.from(store.keys())[i] ?? null;
+    },
+    get length() {
+      return store.size;
+    },
   };
 }

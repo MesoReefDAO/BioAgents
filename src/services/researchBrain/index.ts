@@ -10,6 +10,7 @@ export * from "./graphService";
 export * from "./measurements";
 export * from "./memoryWriter";
 export * from "./normalize";
+export * from "./reviewService";
 export * from "./search";
 export * from "./seedCompounds";
 export * from "./tables";

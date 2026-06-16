@@ -7,12 +7,13 @@ import { CDPProvider } from './providers/CDPProvider';
 import { CoralPrivyProvider } from './providers/PrivyProvider';
 import { AuthProvider } from './contexts';
 import { ProvenanceProvider } from './contexts/ProvenanceContext';
-import { LoginPage, ChatPage, LandingPage, AccessPendingPage, LibraryPage, PaperPage, ResearchBrainPage, CorpusDashboardPage, ViewerPage, LibraryViewerPage } from './pages';
+import { LoginPage, ChatPage, LandingPage, AccessPendingPage, LibraryPage, PaperPage, ResearchBrainPage, CorpusDashboardPage, AdminPage, ViewerPage, LibraryViewerPage } from './pages';
 import { useAuth } from './hooks';
 import './styles/global.css';
 import './styles/coralgpt.css';
 import './styles/library.css';
 import './styles/corpus.css';
+import './styles/admin.css';
 import './styles/provenance.css';
 
 function LoadingScreen() {
@@ -74,6 +75,7 @@ function LegacyAppShell() {
       <ViewerPage path="/viewer/:sourceId" />
       <ResearchBrainPage path="/brain" />
       <CorpusDashboardPage path="/corpus" />
+      <AdminPage path="/admin" />
       <Redirect path="/" to="/chat" />
       <NotFound default redirectTo="/chat" />
     </Router>

@@ -580,3 +580,140 @@ export type EvidencePackContradiction = {
   conflictSummary: string;
   resolutionStatus: "unresolved" | "resolved" | "dismissed";
 };
+
+// ---------------------------------------------------------------------------
+// Bioprospecting Review UI (admin-only surface)
+//
+// These types back the four new admin-only routes on
+// `src/routes/research-brain.ts`:
+//   - GET    /api/research-brain/contradictions
+//   - GET    /api/research-brain/contradictions/stats
+//   - GET    /api/research-brain/dedup/events
+//   - POST   /api/research-brain/dedup/:factId/unmerge
+//
+// See openspec/changes/bioprospecting-review-ui/specs/.../spec.md for
+// the full contract.
+// ---------------------------------------------------------------------------
+
+/**
+ * One row of the activity snapshot returned by
+ * `GET /api/research-brain/contradictions/stats`. Each window
+ * (`today`, `last7d`) carries six non-negative integer metrics:
+ *
+ *   - `found`     COUNT(contradictions WHERE created_at >= window)
+ *   - `resolved`  COUNT(contradictions WHERE resolution_status='resolved'
+ *                 AND resolved_at >= window)
+ *   - `dismissed` COUNT(contradictions WHERE resolution_status='dismissed'
+ *                 AND resolved_at >= window)
+ *   - `pending`   max(0, found - resolved - dismissed) — clamped
+ *                 server-side to defend against clock-skew drift
+ *   - `merges`    COUNT(fact_edges WHERE merged_at >= window
+ *                 AND is_active = true)
+ *   - `unmerges`  COUNT(fact_edges WHERE unmerged_at >= window)
+ */
+export type StatsWindow = {
+  found: number;
+  resolved: number;
+  dismissed: number;
+  pending: number;
+  merges: number;
+  unmerges: number;
+};
+
+/**
+ * Stats response shape. Two windows, six metrics each (12 numbers).
+ * `pending` is non-negative by contract; the route clamps to 0.
+ */
+export type StatsResponse = {
+  today: StatsWindow;
+  last7d: StatsWindow;
+};
+
+/**
+ * One row of the dedup events feed
+ * (`GET /api/research-brain/dedup/events`).
+ *
+ * Each event is a row from `research_bioprospecting_fact_edges`
+ * left-joined to the most recent `research_bioprospecting_dedup_audit`
+ * row for that `fact_id` (NULL when no unmerge audit exists).
+ *
+ * - `eventId`     — composite (canonical_fact_id|merged_fact_id)
+ * - `isActive`    — mirrors the soft-delete flag on the edge row
+ * - `reasonCode`  — the admin-supplied category from the unmerge dialog
+ *                   (NULL on edges that have never been unmerged)
+ * - `reasonDetail`— the free-text detail from the unmerge dialog
+ *                   (NULL on edges that have never been unmerged)
+ */
+export type RecentDedupEvent = {
+  eventId: string;
+  factId: string;
+  canonicalId: string;
+  mergedFactId: string;
+  matchRule: "identity_key" | "embedding";
+  mergedAt: string;
+  unmergedAt: string | null;
+  unmergedBy: string | null;
+  isActive: boolean;
+  reasonCode: ReasonCategory | null;
+  reasonDetail: string | null;
+};
+
+/**
+ * The four reason categories the unmerge dialog dropdown accepts.
+ * The CHECK constraint on `research_bioprospecting_dedup_audit.reason_category`
+ * enforces this set at the database layer; the route and the
+ * `unmergeFact` service helper re-validate before issuing the INSERT.
+ */
+export type ReasonCategory =
+  | "false_positive"
+  | "different_compound"
+  | "measurement_error"
+  | "other";
+
+/**
+ * The four windows the dedup events feed accepts. `'all'` omits the
+ * time filter entirely; the other three map to `NOW() - INTERVAL '...'`.
+ */
+export type DedupEventWindow = "24h" | "7d" | "30d" | "all";
+
+/**
+ * Request body shape for
+ * `POST /api/research-brain/dedup/:factId/unmerge`.
+ *
+ * `reasonCode` is required and validated against the
+ * `ReasonCategory` enum; `reasonDetail` is optional free text.
+ */
+export type UnmergeRequest = {
+  reasonCode: ReasonCategory;
+  reasonDetail?: string | null;
+};
+
+/**
+ * Response body shape for
+ * `POST /api/research-brain/dedup/:factId/unmerge`.
+ *
+ * Both `edge` and `audit` reflect the state AFTER the soft-delete and
+ * the audit insert (same transaction).
+ */
+export type UnmergeResponse = {
+  edge: {
+    canonicalFactId: string;
+    mergedFactId: string;
+    matchRule: "identity_key" | "embedding";
+    mergedAt: string;
+    isActive: boolean;
+    unmergedAt: string;
+    unmergedBy: string;
+  };
+  audit: {
+    id: string;
+    factId: string;
+    eventType: "unmerge";
+    oldCanonicalId: string | null;
+    newCanonicalId: string | null;
+    userId: string | null;
+    reason: string | null;
+    reasonCategory: ReasonCategory;
+    createdAt: string;
+  };
+};

@@ -14,18 +14,28 @@ import {
   getSource,
   getSourceClaims,
   getSourceEvidenceChunk,
+  getContradictionStats,
   listResearchTaxa,
   listSources,
+  listContradictionsGlobal,
+  listRecentMergeEvents,
   normalizeBioprospectingTaxonomy,
   promoteFactToPending,
   researchBrainSearch,
   resolveBioprospectingContradiction,
   searchBioprospectingFacts,
   searchCompoundsByName,
+  unmergeFact,
   updateBioprospectingFactEntities,
   updateBioprospectingFactReview,
   updateBioprospectingFactsReviewBulk,
+  AmbiguousEdgeError,
+  FactNotFoundError,
+  InvalidReasonCategoryError,
+  NoActiveEdgeError,
+  REASON_CATEGORIES,
 } from "../services/researchBrain";
+import type { DedupEventWindow } from "../services/researchBrain";
 import { getServiceClient } from "../db/client";
 import { getDocumentIngestionQueue } from "../services/queue/queues";
 import { isJobQueueEnabled } from "../services/queue/connection";
@@ -1733,6 +1743,205 @@ export const researchBrainRoute = new Elysia({ prefix: "/api/research-brain" })
         set.status = 500;
         return {
           error: "Failed to promote fact",
+          message: error?.message,
+        };
+      }
+    },
+    { beforeHandle: authResolver({ required: true, role: "admin" }) },
+  )
+  // -------------------------------------------------------------------------
+  // Bioprospecting Review UI (admin-only).
+  //
+  // Four new admin-only routes that feed the `/admin` page:
+  //   1. GET  /contradictions                 — global, paginated, filtered
+  //   2. GET  /contradictions/stats           — today + last7d × 6 metrics
+  //   3. GET  /dedup/events                   — paginated, time-windowed
+  //   4. POST /dedup/:factId/unmerge          — soft-delete + audit row
+  //
+  // All routes are gated on `authResolver({ required: true, role: 'admin' })`
+  // — non-admin callers get 401/403. The route layer maps the service
+  // errors (NoActiveEdgeError → 409, FactNotFoundError → 404, etc.).
+  // -------------------------------------------------------------------------
+  .get(
+    "/contradictions",
+    async ({ query, set }) => {
+      const parsed = (query || {}) as {
+        status?: string;
+        sourceId?: string;
+        limit?: string;
+        offset?: string;
+      };
+      const status = parsed.status?.toLowerCase();
+      if (
+        status &&
+        status !== "unresolved" &&
+        status !== "resolved" &&
+        status !== "dismissed"
+      ) {
+        set.status = 400;
+        return {
+          error: "Invalid status. Use: unresolved|resolved|dismissed",
+        };
+      }
+      const limitRaw = parsed.limit ?? "50";
+      const offsetRaw = parsed.offset ?? "0";
+      if (!/^-?\d+$/.test(limitRaw) || !/^-?\d+$/.test(offsetRaw)) {
+        set.status = 400;
+        return { error: "limit and offset must be integers" };
+      }
+      const limit = Math.max(1, Math.min(200, Number(limitRaw) || 50));
+      const offset = Math.max(0, Number(offsetRaw) || 0);
+      try {
+        const result = await listContradictionsGlobal({
+          status: status as
+            | "unresolved"
+            | "resolved"
+            | "dismissed"
+            | undefined,
+          sourceId: parsed.sourceId,
+          limit,
+          offset,
+        });
+        return {
+          contradictions: result.rows,
+          total: result.total,
+          limit: result.limit,
+          offset: result.offset,
+        };
+      } catch (error: any) {
+        logger.error(
+          { err: error, status, sourceId: parsed.sourceId, limit, offset },
+          "admin_contradictions_list_failed",
+        );
+        set.status = 500;
+        return {
+          error: "Failed to list contradictions",
+          message: error?.message,
+        };
+      }
+    },
+    { beforeHandle: authResolver({ required: true, role: "admin" }) },
+  )
+  .get(
+    "/contradictions/stats",
+    async ({ set }) => {
+      try {
+        return await getContradictionStats();
+      } catch (error: any) {
+        logger.error({ err: error }, "admin_contradictions_stats_failed");
+        set.status = 500;
+        return {
+          error: "Failed to compute contradiction stats",
+          message: error?.message,
+        };
+      }
+    },
+    { beforeHandle: authResolver({ required: true, role: "admin" }) },
+  )
+  .get(
+    "/dedup/events",
+    async ({ query, set }) => {
+      const parsed = (query || {}) as {
+        limit?: string;
+        offset?: string;
+        since?: string;
+      };
+      const limitRaw = parsed.limit ?? "50";
+      const offsetRaw = parsed.offset ?? "0";
+      if (!/^-?\d+$/.test(limitRaw) || !/^-?\d+$/.test(offsetRaw)) {
+        set.status = 400;
+        return { error: "limit and offset must be integers" };
+      }
+      const limit = Math.max(1, Math.min(200, Number(limitRaw) || 50));
+      const offset = Math.max(0, Number(offsetRaw) || 0);
+      const sinceRaw = (parsed.since ?? "7d").toLowerCase();
+      if (
+        sinceRaw !== "24h" &&
+        sinceRaw !== "7d" &&
+        sinceRaw !== "30d" &&
+        sinceRaw !== "all"
+      ) {
+        set.status = 400;
+        return { error: "Invalid since. Use: 24h|7d|30d|all" };
+      }
+      const since = sinceRaw as DedupEventWindow;
+      try {
+        return await listRecentMergeEvents({ limit, offset, since });
+      } catch (error: any) {
+        logger.error(
+          { err: error, limit, offset, since },
+          "admin_dedup_events_list_failed",
+        );
+        set.status = 500;
+        return {
+          error: "Failed to list dedup events",
+          message: error?.message,
+        };
+      }
+    },
+    { beforeHandle: authResolver({ required: true, role: "admin" }) },
+  )
+  .post(
+    "/dedup/:factId/unmerge",
+    async ({ params, body, request, set }) => {
+      const { factId } = params;
+      if (!factId) {
+        set.status = 400;
+        return { error: "Missing factId" };
+      }
+      const parsed = (body || {}) as {
+        reasonCode?: string;
+        reasonDetail?: string | null;
+      };
+      const reasonCode = (parsed.reasonCode || "").toLowerCase();
+      if (!REASON_CATEGORIES.includes(reasonCode as any)) {
+        set.status = 400;
+        return {
+          error: "Invalid reasonCode",
+          allowed: REASON_CATEGORIES,
+        };
+      }
+      const userId = (request as any).auth?.userId;
+      if (!userId) {
+        // Defense-in-depth: authResolver({ required: true, role: 'admin' })
+        // should have rejected this already.
+        set.status = 401;
+        return { error: "Authentication required" };
+      }
+      const reasonDetail =
+        typeof parsed.reasonDetail === "string" && parsed.reasonDetail.trim()
+          ? parsed.reasonDetail.trim()
+          : null;
+      try {
+        return await unmergeFact({
+          factId,
+          userId,
+          reason: reasonDetail,
+          reasonCategory: reasonCode as any,
+        });
+      } catch (error: any) {
+        if (error instanceof FactNotFoundError) {
+          set.status = 404;
+          return { error: "Fact not found" };
+        }
+        if (
+          error instanceof NoActiveEdgeError ||
+          error instanceof AmbiguousEdgeError
+        ) {
+          set.status = 409;
+          return { error: error.message };
+        }
+        if (error instanceof InvalidReasonCategoryError) {
+          set.status = 400;
+          return { error: error.message };
+        }
+        logger.error(
+          { err: error, factId, reasonCode },
+          "admin_dedup_unmerge_failed",
+        );
+        set.status = 500;
+        return {
+          error: "Failed to unmerge fact",
           message: error?.message,
         };
       }

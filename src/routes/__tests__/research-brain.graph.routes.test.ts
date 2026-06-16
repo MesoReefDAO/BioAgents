@@ -276,7 +276,7 @@ describe("GET /api/research-brain/graph/compounds/search (admin, expand=false)",
         stats: { fact_count: number };
         topCoOccurring?: unknown;
         topGeographies?: unknown;
-        topBioActivities?: unknown;
+        topBioactivities?: unknown;
       }>;
     };
     expect(body.query).toBe("quercetin");
@@ -288,7 +288,7 @@ describe("GET /api/research-brain/graph/compounds/search (admin, expand=false)",
     // Expand arrays MUST be omitted, not empty arrays.
     expect(body.compounds[0].topCoOccurring).toBeUndefined();
     expect(body.compounds[0].topGeographies).toBeUndefined();
-    expect(body.compounds[0].topBioActivities).toBeUndefined();
+    expect(body.compounds[0].topBioactivities).toBeUndefined();
   });
 });
 
@@ -297,7 +297,7 @@ describe("GET /api/research-brain/graph/compounds/search (admin, expand=false)",
 // ---------------------------------------------------------------------------
 
 describe("GET /api/research-brain/graph/compounds/search (admin, expand=true)", () => {
-  it("returns 200 with topCoOccurring/topGeographies/topBioActivities attached", async () => {
+  it("returns 200 with topCoOccurring/topGeographies/topBioactivities attached", async () => {
     client = scriptedMock(
       [
         { kind: "many", data: [makeMatviewRow()], error: null }, // matview
@@ -337,7 +337,7 @@ describe("GET /api/research-brain/graph/compounds/search (admin, expand=true)", 
       compounds: Array<{
         topCoOccurring: Array<{ canonical_name: string }>;
         topGeographies: Array<{ value: string }>;
-        topBioActivities: Array<{ value: string }>;
+        topBioactivities: Array<{ value: string }>;
       }>;
     };
     expect(body.expand).toBe(true);
@@ -345,7 +345,7 @@ describe("GET /api/research-brain/graph/compounds/search (admin, expand=true)", 
       "Kaempferol",
     );
     expect(body.compounds[0].topGeographies[0].value).toBe("Southeast Asia");
-    expect(body.compounds[0].topBioActivities).toBeDefined();
+    expect(body.compounds[0].topBioactivities).toBeDefined();
   });
 });
 

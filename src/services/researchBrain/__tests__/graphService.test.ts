@@ -452,7 +452,7 @@ describe("graphService — searchCompounds (expand: false)", () => {
     // Default response shape: no expand arrays.
     expect(result[0].topCoOccurring).toBeUndefined();
     expect(result[0].topGeographies).toBeUndefined();
-    expect(result[0].topBioActivities).toBeUndefined();
+    expect(result[0].topBioactivities).toBeUndefined();
     // No RPC calls.
     const rpcCalls = calls.filter((c) => c.method === "rpc");
     expect(rpcCalls.length).toBe(0);
@@ -527,7 +527,7 @@ describe("graphService — searchCompounds (expand: true)", () => {
     expect(result[0].topCoOccurring![0].fact_count).toBe(41);
     expect(result[0].topGeographies).toBeDefined();
     expect(result[0].topGeographies![0].value).toBe("Southeast Asia");
-    expect(result[0].topBioActivities).toBeDefined();
+    expect(result[0].topBioactivities).toBeDefined();
 
     // Three RPC calls were made: one for each of the top-N helpers.
     const rpcCalls = calls.filter((c) => c.method === "rpc");

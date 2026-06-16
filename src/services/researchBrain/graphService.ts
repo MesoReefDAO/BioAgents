@@ -104,7 +104,7 @@ export type SearchCompoundsResult = {
   /** Present iff params.expand === true. */
   topGeographies?: TopStringBucket[];
   /** Present iff params.expand === true. */
-  topBioActivities?: TopStringBucket[];
+  topBioactivities?: TopStringBucket[];
 };
 
 // ---------------------------------------------------------------------------
@@ -296,7 +296,7 @@ export async function searchCompounds(
   if (params.expand === true) {
     return await Promise.all(
       top.map(async (hit) => {
-        const [topCoOccurring, topGeographies, topBioActivities] =
+        const [topCoOccurring, topGeographies, topBioactivities] =
           await Promise.all([
             getTopCoOccurring(hit.compound.compound_id, 5),
             getTopGeographies(hit.compound.compound_id, 5),
@@ -307,7 +307,7 @@ export async function searchCompounds(
           stats: hit.compound.stats,
           topCoOccurring,
           topGeographies,
-          topBioActivities,
+          topBioactivities,
         };
       }),
     );

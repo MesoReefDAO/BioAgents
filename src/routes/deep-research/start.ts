@@ -44,6 +44,7 @@ import {
   notifyStateUpdated,
 } from "../../services/queue/notify";
 import { getDeepResearchQueue } from "../../services/queue/queues";
+import { persistDiscoveriesToDb } from "../../services/researchBrain/discoveryPersistence";
 import type { AuthContext } from "../../types/auth";
 import type {
   ConversationState,
@@ -1781,6 +1782,22 @@ These molecular changes align with established longevity pathways (Converging nu
 
       // Update conversation state with discovery results if discovery ran
       if (discoveryResult) {
+        // v1: write-through to research_discoveries BEFORE the JSONB write.
+        // Soft-fails internally; cycle MUST NOT abort on this call.
+        try {
+          await persistDiscoveriesToDb({
+            discoveries: discoveryResult.discoveries,
+            conversationId,
+            messageId: createdMessage.id,
+            threshold: 0.7,
+          });
+        } catch (err) {
+          logger.error(
+            { err, conversationId },
+            "discovery_persist_failed_soft_fail",
+          );
+        }
+
         conversationState.values.discoveries = discoveryResult.discoveries;
         logger.info(
           {

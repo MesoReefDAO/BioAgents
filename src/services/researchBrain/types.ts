@@ -558,6 +558,77 @@ export type ResearchBioprospectingContradiction = {
   updated_at: string;
 };
 
+// ---------------------------------------------------------------------------
+// discovery-persistence (v1): relational row shapes for
+// research_discoveries + research_discovery_evidence.
+//
+// These types back the write-through path in the discovery agent and the
+// future read endpoint (PR #2). v1 does NOT change the in-memory Discovery
+// type — that stays in src/types/core.ts and is the source of truth for
+// planning / reply / paper generation.
+// ---------------------------------------------------------------------------
+
+/**
+ * Lifecycle marker for a discovery's re-evaluation status. Mirrors
+ * the `reeval_status` CHECK constraint on `research_discoveries`.
+ * v1 always writes `'none'` (the column default). PR #2 (re-evaluation)
+ * will transition rows through the other values.
+ */
+export type ResearchDiscoveryReevalStatus =
+  | "none"
+  | "pending"
+  | "clean"
+  | "extended"
+  | "contradicted";
+
+/**
+ * One row of `research_discoveries`. The column names match the SQL
+ * table exactly (snake_case) so the Supabase `.from("research_discoveries")
+ * .select("*")` payload can be cast directly to this type.
+ *
+ * `evidence` is the in-process join from `getDiscoveriesForConversation`
+ * (PR #2) — the v1 read path returns `[]` for this field per the spec.
+ */
+export type ResearchDiscovery = {
+  id: string;
+  discovery_group_id: string;
+  conversation_id: string;
+  message_id: string | null;
+  supersedes_discovery_id: string | null;
+  is_current: boolean;
+  superseded_at: string | null;
+  title: string;
+  claim: string;
+  summary: string;
+  novelty: string | null;
+  artifacts: AnalysisArtifact[];
+  discovery_key: string;
+  reeval_status: ResearchDiscoveryReevalStatus;
+  reeval_notes: string | null;
+  last_checked_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+/**
+ * One row of `research_discovery_evidence`. `task_id` references a
+ * `PlanTask.id` (TEXT in JSONB, no FK). `source_url` is forward-compat
+ * (PR #2 will populate it on re-eval). `evidence_archived` is a
+ * denormalized badge — the v1 read path always returns `false` per
+ * spec limitation §8.2; PR #2 will compute the real value from the
+ * plan tree.
+ */
+export type ResearchDiscoveryEvidence = {
+  id: string;
+  discovery_id: string;
+  task_id: string;
+  job_id: string | null;
+  explanation: string;
+  source_url: string | null;
+  evidence_archived: boolean;
+  created_at: string;
+};
+
 export type EvidencePackContradiction = {
   id: string;
   contradictionType: string;

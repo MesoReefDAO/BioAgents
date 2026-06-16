@@ -46,6 +46,7 @@ import {
   notifyStateUpdated,
 } from "../notify";
 import { getDeepResearchQueue } from "../queues";
+import { persistDiscoveriesToDb } from "../../researchBrain/discoveryPersistence";
 import type {
   DeepResearchJobData,
   DeepResearchJobResult,
@@ -955,6 +956,23 @@ async function processDeepResearchJob(
 
     // Update conversation state with discovery results if discovery ran
     if (discoveryResult) {
+      // v1: write-through to research_discoveries BEFORE the JSONB write.
+      // Soft-fails internally; cycle MUST NOT abort on this call.
+      try {
+        await persistDiscoveriesToDb({
+          discoveries: discoveryResult.discoveries,
+          conversationId,
+          messageId: messageRecord.id,
+          threshold: 0.7,
+          loggerFields: { jobId: job.id },
+        });
+      } catch (err) {
+        logger.error(
+          { err, jobId: job.id, conversationId },
+          "discovery_persist_failed_soft_fail",
+        );
+      }
+
       conversationState.values.discoveries = discoveryResult.discoveries;
       logger.info(
         { jobId: job.id, discoveryCount: discoveryResult.discoveries.length },

@@ -15,6 +15,7 @@ import {
   replaceBioprospectingFactsForSource,
   setSourceBioprospectingStatus,
 } from "./db";
+import { refreshAggregates } from "./graphService";
 import { resolveResearchBrainLLM } from "./llm";
 import { loadTablesForSource } from "./tables";
 import type {
@@ -478,6 +479,19 @@ export async function extractBioprospectingFactsForSource(
       stampedFacts,
       chunks,
     );
+
+    // Soft-fail refresh of the compound aggregate matview. NEVER
+    // aborts the extraction. Mirrors the soft-fail pattern around
+    // attachCompoundAuthority (this file, lines 462-473) so a
+    // failed refresh logs a warning and the batch continues.
+    try {
+      await refreshAggregates();
+    } catch (err) {
+      logger?.warn(
+        { err, sourceId: source.id },
+        "graph_compound_aggregates_refresh_failed_soft_fail",
+      );
+    }
 
     logger.info(
       { sourceId, factCount: saved.length, tableCount: tables.length },

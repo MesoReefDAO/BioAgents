@@ -6,6 +6,7 @@ import { Elysia } from "elysia";
 import { artifactsRoute } from "./routes/artifacts";
 import { libraryRoute } from "./routes/library";
 import { researchBrainRoute } from "./routes/research-brain";
+import { researchBrainGraphRoute } from "./routes/research-brain-graph";
 import { tableMergesRoute } from "./routes/admin/table-merges";
 import { authRoute } from "./routes/auth";
 import { chatRoute } from "./routes/chat";
@@ -323,6 +324,7 @@ const app = new Elysia()
   .use(artifactsRoute) // GET /api/artifacts/download for artifact downloads
   .use(libraryRoute) // GET/POST /api/library/* for paper library + per-paper Q&A
   .use(researchBrainRoute) // GET/POST /api/research-brain/* for evidence-first Research Brain
+  .use(researchBrainGraphRoute) // GET /api/research-brain/graph/compounds/search for v1 knowledge graph (PR #1 of bioprospecting-knowledge-graph)
   .use(tableMergesRoute) // POST/DELETE/GET /api/research-brain/tables/* for admin table-merge overrides (PR #3 of bioprospecting-multipage-table-merge)
   .use(filesRoute) // POST /api/files/* for direct S3 file uploads
 

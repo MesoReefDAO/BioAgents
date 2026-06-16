@@ -6,6 +6,7 @@ export * from "./contradictionDetector";
 export * from "./contradictionLlM";
 export * from "./db";
 export * from "./extractor";
+export * from "./graphService";
 export * from "./measurements";
 export * from "./memoryWriter";
 export * from "./normalize";

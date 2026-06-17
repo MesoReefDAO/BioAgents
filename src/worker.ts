@@ -20,10 +20,39 @@ import { createBioprospectingWorker } from "./services/queue/workers/bioprospect
 import { createCompoundAuthorityWorker } from "./services/queue/workers/compoundAuthority.worker";
 import { closeConnections } from "./services/queue/connection";
 import { startDailyApiUsageGc } from "./services/queue/dailyApiUsageGc";
+import { getCompoundAuthorityQueue } from "./services/queue/queues";
 import logger from "./utils/logger";
 
 async function main() {
   logger.info("Starting BullMQ workers...");
+
+  // Initialize the compound-authority queue on worker boot so the
+  // repeatable tick (`compound-authority-tick` every
+  // COMPOUND_AUTHORITY_INTERVAL_HOURS) is registered with BullMQ.
+  // Without this, the queue is only created on first call from a
+  // route handler — which never happens automatically, so the
+  // compound-authority worker would silently idle forever.
+  //
+  // Calling getCompoundAuthorityQueue() is a no-op when
+  // COMPOUND_AUTHORITY_ENABLED=false (the function returns a queue
+  // instance but skips repeat registration).
+  if (process.env.COMPOUND_AUTHORITY_ENABLED !== "false") {
+    try {
+      const compoundAuthorityQueue = getCompoundAuthorityQueue();
+      logger.info(
+        { queue: "compound-authority" },
+        "compound_authority_queue_initialized_at_worker_boot",
+      );
+      // Touch the instance so the repeat registration side-effect fires
+      // (queues.ts registers the repeat inside getCompoundAuthorityQueue).
+      void compoundAuthorityQueue;
+    } catch (err) {
+      logger.warn(
+        { err },
+        "compound_authority_queue_init_failed_continuing",
+      );
+    }
+  }
 
   // Start workers
   const chatWorker = startChatWorker();

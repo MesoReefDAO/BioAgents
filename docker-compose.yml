@@ -179,6 +179,105 @@ services:
       start_period: 40s
 
   # ==========================================================================
+  # BullMQ Worker - background job processor
+  # Runs the same image as `bioagents` but with a different CMD that
+  # starts src/worker.ts (chat, deep-research, bioprospecting, file-process,
+  # paper-generation, document-ingestion, and compound-authority workers).
+  # Shares the same Redis instance for queue state.
+  #
+  # IMPORTANT: this container REQUIRES USE_JOB_QUEUE=true in .env.
+  # Without it, the worker process exits because the queue layer refuses
+  # to register jobs against a disabled queue.
+  #
+  # To disable just the compound-authority worker (e.g., for cost control),
+  # set COMPOUND_AUTHORITY_ENABLED=false in .env — the worker respects
+  # this env at boot.
+  # ==========================================================================
+  worker:
+    build:
+      context: .
+      args:
+        SUPABASE_URL: ${SUPABASE_URL}
+        SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY}
+        PRIVY_APP_ID: ${PRIVY_APP_ID:-}
+        CORALGPT_HERO_VIDEO_URL: ${CORALGPT_HERO_VIDEO_URL:-}
+        GIT_SHA: ${GIT_SHA:-unknown}
+        BUILD_DATE: ${BUILD_DATE:-}
+    container_name: bioagents-worker
+    command: ["bun", "run", "src/worker.ts"]
+    volumes:
+      # Bind mount so the worker reads the same ./docs as the API
+      # (the bioprospecting + document-ingestion workers scan this path)
+      - ./docs:/app/docs
+      - bioagents-images:/app/client/public/images
+    environment:
+      # Mirror the API's LLM provider overrides so workers see the
+      # same model selection. These are sourced from .env via
+      # env_file below.
+      - REPLY_LLM_PROVIDER=${REPLY_LLM_PROVIDER:-openai}
+      - REPLY_LLM_MODEL=${REPLY_LLM_MODEL:-gpt-5.4}
+      - HYP_LLM_PROVIDER=${HYP_LLM_PROVIDER:-openai}
+      - HYP_LLM_MODEL=${HYP_LLM_MODEL:-gpt-5.4}
+      - PLANNING_LLM_PROVIDER=${PLANNING_LLM_PROVIDER:-openai}
+      - PLANNING_LLM_MODEL=${PLANNING_LLM_MODEL:-gpt-5.4}
+      - STRUCTURED_LLM_PROVIDER=${STRUCTURED_LLM_PROVIDER:-openai}
+      - STRUCTURED_LLM_MODEL=${STRUCTURED_LLM_MODEL:-gpt-5.4}
+      - DISCOVERY_LLM_PROVIDER=${DISCOVERY_LLM_PROVIDER:-openai}
+      - DISCOVERY_LLM_MODEL=${DISCOVERY_LLM_MODEL:-gpt-5.4}
+      - REFLECTION_LLM_PROVIDER=${REFLECTION_LLM_PROVIDER:-openai}
+      - REFLECTION_LLM_MODEL=${REFLECTION_LLM_MODEL:-gpt-5.4}
+      - PAPER_GEN_LLM_PROVIDER=${PAPER_GEN_LLM_PROVIDER:-openai}
+      - PAPER_GEN_LLM_MODEL=${PAPER_GEN_LLM_MODEL:-gpt-5.4}
+
+      # Embedding configuration
+      - EMBEDDING_PROVIDER=${EMBEDDING_PROVIDER:-openai}
+      - TEXT_EMBEDDING_MODEL=${TEXT_EMBEDDING_MODEL:-text-embedding-3-large}
+
+      # Compound Authority worker settings (defaults; override via .env)
+      - COMPOUND_AUTHORITY_ENABLED=${COMPOUND_AUTHORITY_ENABLED:-true}
+      - COMPOUND_AUTHORITY_RATE_LIMIT_RPS=${COMPOUND_AUTHORITY_RATE_LIMIT_RPS:-4}
+      - COMPOUND_AUTHORITY_MAX_RETRIES=${COMPOUND_AUTHORITY_MAX_RETRIES:-3}
+
+      # Queue configuration
+      - USE_JOB_QUEUE=true
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379}
+
+      # Queue concurrency
+      - CHAT_QUEUE_CONCURRENCY=${CHAT_QUEUE_CONCURRENCY:-5}
+      - DEEP_RESEARCH_QUEUE_CONCURRENCY=${DEEP_RESEARCH_QUEUE_CONCURRENCY:-3}
+      - FILE_PROCESS_QUEUE_CONCURRENCY=${FILE_PROCESS_QUEUE_CONCURRENCY:-5}
+      - PAPER_GENERATION_QUEUE_CONCURRENCY=${PAPER_GENERATION_QUEUE_CONCURRENCY:-1}
+      - DOCUMENT_INGESTION_QUEUE_CONCURRENCY=${DOCUMENT_INGESTION_QUEUE_CONCURRENCY:-2}
+      - BIOPROSPECTING_QUEUE_CONCURRENCY=${BIOPROSPECTING_QUEUE_CONCURRENCY:-1}
+
+      # PubChem rate-limit gating (default 200K requests/day)
+      - PUBCHEM_DAILY_REQUEST_CAP=${PUBCHEM_DAILY_REQUEST_CAP:-200000}
+
+      # Cost guard rails
+      - COST_GUARD_GC_ENABLED=${COST_GUARD_GC_ENABLED:-true}
+
+      - NODE_ENV=production
+      - HOST=0.0.0.0
+    env_file:
+      - .env
+    restart: unless-stopped
+
+    # The worker process doesn't expose an HTTP port. Health check via
+    # bun -e making an HTTP request to the API server's health endpoint.
+    # The API and worker share the same docker network, so `bioagents:3000`
+    # resolves. If the API is healthy, Redis is healthy (they share
+    # infra), and the worker has its config + supabase keys (proven by
+    # the API being able to start).
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - 'bun -e ''fetch("http://bioagents:3000/api/health").then(r=>r.ok?process.exit(0):process.exit(1)).catch(()=>process.exit(1))'''
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # ==========================================================================
   # Caddy - HTTPS reverse proxy (required by Privy outside localhost)
   # Access CoralGPT at https://<your-server-ip>  (accept self-signed cert in dev)
   # HTTP on :3000 still works for http://localhost only

@@ -1,4 +1,4 @@
-import { useState } from "preact/hooks";
+import { useState, useEffect } from "preact/hooks";
 import { Icon } from "../icons";
 import { ArtifactViewer } from "./ArtifactViewer";
 
@@ -114,6 +114,49 @@ export function ResearchStatePanel({
       PLANNING: { label: "Planning", icon: "📋", color: "#3b82f6" },
     };
     return types[type] || { label: type, icon: "⚡", color: "#6b7280" };
+  };
+
+  // Format milliseconds as "12.3s" or "1m 23s" or "1h 5m"
+  const formatMs = (ms: number): string => {
+    if (ms < 1000) return `${ms}ms`;
+    const s = Math.floor(ms / 1000);
+    if (s < 60) return `${s}s`;
+    const m = Math.floor(s / 60);
+    const rs = s % 60;
+    if (m < 60) return rs ? `${m}m ${rs}s` : `${m}m`;
+    const h = Math.floor(m / 60);
+    const rm = m % 60;
+    return rm ? `${h}h ${rm}m` : `${h}h`;
+  };
+
+  // Compute the duration of a step in human-readable form.
+  // For the current step, ticks every render (live counter).
+  const computeDuration = (
+    start?: string,
+    end?: string,
+    isCurrent = false,
+  ): string | null => {
+    if (!start) return null;
+    const startMs = new Date(start).getTime();
+    const endMs = end ? new Date(end).getTime() : Date.now();
+    if (isNaN(startMs) || isNaN(endMs)) return null;
+    return formatMs(endMs - startMs);
+  };
+
+  // Live counter for the current step: re-renders every second while a
+  // step is in progress, showing "Running for 12s...".
+  const ElapsedSince = ({ start }: { start?: string }) => {
+    const [now, setNow] = useState(Date.now());
+    useEffect(() => {
+      if (!start) return;
+      const t = setInterval(() => setNow(Date.now()), 1000);
+      return () => clearInterval(t);
+    }, [start]);
+    if (!start) return null;
+    const ms = now - new Date(start).getTime();
+    return (
+      <span className="research-step-elapsed">({formatMs(ms)})</span>
+    );
   };
 
   const parseCitationText = (text: string) => {
@@ -551,8 +594,61 @@ export function ResearchStatePanel({
               <div className="research-section-label">
                 <span className="research-step-spinner" />
                 Running: {formatStepType(currentStep.type).label}
+                <ElapsedSince start={currentStep.start} />
               </div>
               <p className="research-step-objective">{currentStep.objective}</p>
+            </div>
+          )}
+
+          {/* Activity Log (completed + current steps with timing) */}
+          {state?.plan && state.plan.length > 0 && (
+            <div className="research-section research-activity-log">
+              <button
+                className="research-activity-log-header"
+                onClick={() => toggleSection("activityLog")}
+              >
+                <span className="research-section-label">
+                  <span className="research-activity-log-icon">📋</span>
+                  Activity Log ({state.plan.filter(s => s.end).length}/{state.plan.length} done)
+                </span>
+                <Icon
+                  name="chevronDown"
+                  size={14}
+                  className={`research-section-chevron ${expandedSections.activityLog ? "expanded" : ""}`}
+                />
+              </button>
+              {expandedSections.activityLog && (
+                <div className="research-activity-log-list">
+                  {state.plan.map((step, idx) => {
+                    const stepInfo = formatStepType(step.type);
+                    const isCurrent = currentStep === step;
+                    const isDone = !!step.end;
+                    const duration = computeDuration(step.start, step.end, isCurrent);
+                    return (
+                      <div
+                        key={idx}
+                        className={`research-activity-log-item ${isCurrent ? "current" : ""} ${isDone ? "done" : ""}`}
+                      >
+                        <span className="research-activity-log-icon">
+                          {isCurrent ? "⏳" : isDone ? "✓" : stepInfo.icon}
+                        </span>
+                        <span className="research-activity-log-type">
+                          {stepInfo.label}
+                        </span>
+                        {duration && (
+                          <span className="research-activity-log-duration">
+                            {duration}
+                          </span>
+                        )}
+                        <span className="research-activity-log-objective">
+                          {step.objective?.slice(0, 80)}
+                          {step.objective && step.objective.length > 80 ? "…" : ""}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           )}
         </div>

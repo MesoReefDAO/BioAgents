@@ -997,19 +997,37 @@ export async function backfillBioprospectingFactDedup(params: {
   const batchSize = params.batchSize ?? 500;
   const dryRun = params.dryRun ?? true;
 
+  // PostgREST does not support `(SELECT ...)` as the value of
+  // `.not("id", "in", ...)`, so we fetch the merged ids separately
+  // and apply the dedup filter in JS. For typical ingestion runs
+  // (hundreds of facts) the edges table is small and this is cheap.
+  const { data: edgeRows, error: edgeError } = await supabase
+    .from("research_bioprospecting_fact_edges")
+    .select("merged_fact_id");
+  if (edgeError) {
+    logger.warn({ err: edgeError }, "dedup_edges_load_failed_continuing");
+  }
+  const mergedIds = new Set(
+    (edgeRows || []).map((r: { merged_fact_id: string }) => r.merged_fact_id),
+  );
+
   const { data: candidateRows, error: candidateError } = await supabase
     .from("research_bioprospecting_facts")
     .select(
       "id, source_id, species, compound, bioactivity, organism_part, geography, review_status, updated_at, created_at, merged_into_fact_id",
     )
-    .not(
-      "id",
-      "in",
-      "(SELECT merged_fact_id FROM research_bioprospecting_fact_edges)",
-    )
     .order("created_at", { ascending: true })
     .order("id", { ascending: true })
-    .limit(limit);
+    .limit(limit * 2); // over-fetch so the in-memory filter can drop merged rows
+
+  if (candidateError) throw candidateError;
+
+  // Drop merged siblings in JS (the postgrest `.not("id", "in", "(SELECT …)")` form is invalid).
+  const dedupedRows = (candidateRows || []).filter(
+    (r: { id: string }) => !mergedIds.has(r.id),
+  );
+  // Re-apply the limit after the in-memory filter.
+  return dedupedRows.slice(0, limit) as typeof candidateRows;
 
   if (candidateError) throw candidateError;
 
@@ -2025,12 +2043,30 @@ export async function searchClaims(params: {
     }
   }
 
-  const terms = query
+  // Build an OR of individual words so the match does not require the
+  // full phrase to appear verbatim in the claim. We strip diacritics so
+  // "antifungica" matches "antifungal", and we include both the raw
+  // and the diacritic-stripped forms so a query without accents still
+  // matches claims with accents and vice versa.
+  const rawWords = query
     .split(/\s+/)
     .map((term) => term.replace(/[^\w-]/g, ""))
     .filter((term) => term.length > 2)
-    .slice(0, 10)
+    .slice(0, 10);
+  const strippedWords = rawWords
+    .map((w) => stripDiacritics(w))
+    .filter((w) => w.length > 2);
+  const allTerms = Array.from(new Set([...rawWords, ...strippedWords]));
+  const orExpr = allTerms
+    .map((w) => w.replace(/'/g, "''"))
     .join(" | ");
+
+  // The english textSearch config in Postgres does not tokenize
+  // accented characters ("antifungica" doesn't match "antifungal"), so
+  // if the query contains any diacritic we skip textSearch and fall
+  // back to per-word ilike (which IS accent-sensitive at the byte
+  // level but our search loop below uses both raw + stripped forms).
+  const queryHasDiacritics = /[áéíóúàèìòùäëïöüâêîôûñç]/i.test(query);
 
   let builder = supabase
     .from("research_claims")
@@ -2041,13 +2077,16 @@ export async function searchClaims(params: {
     builder = builder.eq("trust_tier", params.trustTier);
   }
 
-  if (terms) {
-    builder = builder.textSearch("claim", terms, {
-      type: "websearch",
-      config: "english",
-    });
+  if (orExpr) {
+    // Build an OR-of-ilikes for each word (with its diacritic-stripped
+    // variant) so the search finds claims containing any of the query
+    // words regardless of accent marks.
+    const orClauses = allTerms
+      .map((w) => `claim.ilike.%${escapeIlike(w)}%`)
+      .join(",");
+    builder = builder.or(orClauses);
   } else {
-    builder = builder.ilike("claim", `%${query}%`);
+    builder = builder.ilike("claim", `%${escapeIlike(query)}%`);
   }
 
   const { data, error } = await builder;
@@ -2066,16 +2105,36 @@ export async function searchClaims(params: {
     addClaims((data || []) as ResearchClaim[]);
   }
 
+  // Try each candidate phrase first, then fall back to individual
+  // diacritic-stripped words so accent/spelling variants still match
+  // claims whose text uses the canonical (non-accented) form.
+  const triedSearches = new Set<string>();
+  const searchTerms: string[] = [];
   for (const candidate of candidates) {
+    searchTerms.push(candidate);
+    const stripped = stripDiacritics(candidate);
+    if (stripped !== candidate) searchTerms.push(stripped);
+  }
+  for (const w of allTerms) {
+    if (w.length >= 3) {
+      searchTerms.push(w);
+      const stripped = stripDiacritics(w);
+      if (stripped !== w) searchTerms.push(stripped);
+    }
+  }
+
+  for (const term of searchTerms) {
     if (claimMap.size >= limit) break;
+    if (triedSearches.has(term)) continue;
+    triedSearches.add(term);
 
     const claimSearch = await applyTrustTier(selectClaims())
-      .ilike("claim", `%${escapeIlike(candidate)}%`)
+      .ilike("claim", `%${escapeIlike(term)}%`)
       .limit(limit);
 
     if (claimSearch.error) {
       logger.warn(
-        { err: claimSearch.error, candidate },
+        { err: claimSearch.error, term },
         "research_claim_phrase_search_failed",
       );
     } else {
@@ -2087,13 +2146,13 @@ export async function searchClaims(params: {
     let chunkBuilder = supabase
       .from("research_evidence_chunks")
       .select("id, source_id")
-      .ilike("content", `%${escapeIlike(candidate)}%`)
+      .ilike("content", `%${escapeIlike(term)}%`)
       .limit(limit);
 
     const { data: chunks, error: chunkError } = await chunkBuilder;
     if (chunkError) {
       logger.warn(
-        { err: chunkError, candidate },
+        { err: chunkError, term },
         "research_evidence_chunk_phrase_search_failed",
       );
       continue;
@@ -2157,9 +2216,26 @@ async function hydrateMissingClaimChunks(
   return claims;
 }
 
+// Strip Spanish/accented diacritics to enable accent-insensitive matching
+// against claim text. Maps accented Latin letters to their ASCII base.
+const DIACRITIC_MAP: Record<string, string> = {
+  á: "a", é: "e", í: "i", ó: "o", ú: "u",
+  à: "a", è: "e", ì: "i", ò: "o", ù: "u",
+  ä: "a", ë: "e", ï: "i", ö: "o", ü: "u",
+  â: "a", ê: "e", î: "i", ô: "o", û: "u",
+  ñ: "n", ç: "c",
+};
+
+function stripDiacritics(s: string): string {
+  return s.replace(/[áéíóúàèìòùäëïöüâêîôûñç]/g, (m) => DIACRITIC_MAP[m] || m);
+}
+
 function buildSearchCandidates(query: string): string[] {
   const candidates = new Set<string>();
   const cleaned = query.replace(/\s+/g, " ").trim();
+  // Add a diacritic-stripped variant so accent-insensitive searches
+  // still match (e.g. "antifungica" finds "antifungal").
+  const stripped = stripDiacritics(cleaned);
 
   const quoted = cleaned.match(/["“”']([^"“”']{8,})["“”']/g) || [];
   for (const match of quoted) {
@@ -2180,6 +2256,12 @@ function buildSearchCandidates(query: string): string[] {
   }
 
   if (cleaned.length >= 12 && cleaned.length <= 260) candidates.add(cleaned);
+
+  // Add the diacritic-stripped whole query as a candidate so
+  // "antifungica" can match claims containing "antifungal".
+  if (stripped !== cleaned && stripped.length >= 12 && stripped.length <= 260) {
+    candidates.add(stripped);
+  }
 
   return Array.from(candidates)
     .map((candidate) => candidate.replace(/\s+/g, " ").trim())

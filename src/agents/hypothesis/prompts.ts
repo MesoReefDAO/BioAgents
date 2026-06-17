@@ -61,8 +61,10 @@ Write exactly these sections in markdown:
 - Only suggest if truly relevant to the hypothesis
 
 REFUSAL FORMAT (MARKDOWN)
-If the Evidence Set is empty or contains no usable information (neither literature with DOIs/URLs nor computational analysis results), write only:
+If, AND ONLY IF, the Evidence Set is truly empty (no document blocks at all) or contains no scientific information at all (no compounds, no bioactivities, no measurements, no findings), write only:
 Unable to generate a hypothesis – Insufficient evidence: no relevant information present in the provided Evidence Set.
+
+IMPORTANT — BEFORE REFUSING: enumerate every compound, organism, bioactivity, and measurement mentioned anywhere in the Evidence Set. A "yes/no answer" or "no direct antifungal data" is NOT insufficient evidence — it is a FINDING. Refusal is reserved for genuinely empty inputs.
 
 CONSTRAINTS
 - Use only the Evidence Set (document blocks in the same message) for factual claims and citations.

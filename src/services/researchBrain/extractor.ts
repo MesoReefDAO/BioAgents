@@ -108,9 +108,9 @@ async function llmClaimsFromChunks(
 Strict rules:
 - Return ONLY valid JSON array.
 - Each item must have: claim, claimType, status, confidence, chunkIndex, entities.
-- Use status "supported" only when the claim is directly stated in the referenced chunk.
-- Use "hypothesis" for speculative interpretations.
-- Use "open_question" for explicit limitations or unanswered questions.
+- Use status "supported" whenever the claim is stated or clearly demonstrated in the chunk, EVEN IF PARTIAL (e.g., mentions an activity but not specific MIC values — that is still supported, not an open question).
+- Only use "open_question" when the paper EXPLICITLY says the question is unanswered, e.g. "further studies are needed" or "this remains to be determined". Do NOT mark a claim as open_question just because the chunk is partial.
+- Use "hypothesis" for the authors' own speculative interpretations (rare).
 - Do not invent facts outside the chunks.
 - Prefer 5-12 high-signal claims.
 

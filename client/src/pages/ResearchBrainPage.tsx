@@ -45,7 +45,8 @@ const ENTITY_FIELDS: Array<{
   { key: "condition", label: "Condición" },
 ];
 
-function statusLabel(status: string) {
+function statusLabel(status: string | null | undefined) {
+  if (!status) return "—";
   return status.replace(/_/g, " ");
 }
 

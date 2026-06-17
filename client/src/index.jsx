@@ -67,20 +67,22 @@ function LegacyAppShell() {
   }
 
   return (
-    <Router onChange={handleRouteChange}>
-      <LoginPage path="/login" />
-      <ChatPage path="/chat/:sessionId?" />
-      <LibraryPage path="/library" />
-      <PaperPage path="/library/:docId" />
-      <LibraryViewerPage path="/library/:docId/viewer" />
-      <ViewerPage path="/viewer/:sourceId" />
-      <ResearchBrainPage path="/brain" />
-      <CorpusDashboardPage path="/corpus" />
-      <AdminPage path="/admin" />
-      <Redirect path="/" to="/chat" />
-      <NotFound default redirectTo="/chat" />
+    <>
+      <Router onChange={handleRouteChange}>
+        <LoginPage path="/login" />
+        <ChatPage path="/chat/:sessionId?" />
+        <LibraryPage path="/library" />
+        <PaperPage path="/library/:docId" />
+        <LibraryViewerPage path="/library/:docId/viewer" />
+        <ViewerPage path="/viewer/:sourceId" />
+        <ResearchBrainPage path="/brain" />
+        <CorpusDashboardPage path="/corpus" />
+        <AdminPage path="/admin" />
+        <Redirect path="/" to="/chat" />
+        <NotFound default redirectTo="/chat" />
+      </Router>
       <Footer />
-    </Router>
+    </>
   );
 }
 
@@ -116,19 +118,21 @@ function CoralAppShell() {
   }
 
   return (
-    <Router onChange={handleRouteChange}>
-      <LandingPage path="/" />
-      <AccessPendingPage path="/access-pending" />
-      <ChatPage path="/chat/:sessionId?" coralGptMode privyLogout={privyLogout} />
-      <LibraryPage path="/library" coralGptMode />
-      <PaperPage path="/library/:docId" coralGptMode />
-      <LibraryViewerPage path="/library/:docId/viewer" coralGptMode />
-      <ViewerPage path="/viewer/:sourceId" coralGptMode />
-      <ResearchBrainPage path="/brain" coralGptMode />
-      <AdminPage path="/admin" />
-      <NotFound default redirectTo="/" />
+    <>
+      <Router onChange={handleRouteChange}>
+        <LandingPage path="/" />
+        <AccessPendingPage path="/access-pending" />
+        <ChatPage path="/chat/:sessionId?" coralGptMode privyLogout={privyLogout} />
+        <LibraryPage path="/library" coralGptMode />
+        <PaperPage path="/library/:docId" coralGptMode />
+        <LibraryViewerPage path="/library/:docId/viewer" coralGptMode />
+        <ViewerPage path="/viewer/:sourceId" coralGptMode />
+        <ResearchBrainPage path="/brain" coralGptMode />
+        <AdminPage path="/admin" />
+        <NotFound default redirectTo="/" />
+      </Router>
       <Footer />
-    </Router>
+    </>
   );
 }
 

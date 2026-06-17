@@ -1,6 +1,6 @@
 # BioAgents — Estado Actual de la Plataforma
 
-> **Documento de estado interno** (junio 2026) — qué pueden hacer los usuarios hoy, qué no, y qué viene.
+> **Documento de estado interno** (17 junio 2026) — qué pueden hacer los usuarios hoy, qué no, y qué viene.
 
 ## TL;DR
 
@@ -14,19 +14,32 @@ BioAgents es un **AI Scientist Framework** para bioprospecting. Los usuarios sub
 
 | Feature | Qué hace | Cómo se usa |
 |---|---|---|
-| **Ingesta de papers** | Subís un PDF o un paper de PubMed, el sistema lo procesa async con workers BullMQ | Drop zone en `/library`, o ingest URL |
+| **Ingesta de papers** | Subís un PDF o un paper de PubMed, el sistema lo procesa async con BullMQ | Drop zone en `/library`, o ingest URL |
 | **Extracción bioprospecting** | LLM extrae: compuesto, especie, bioactividad, mecanismo, contexto geográfico | Auto en la ingesta, editables después |
 | **Tablas estructuradas de PDFs** | Extrae tablas como markdown con headers jerárquicos preservados (multi-página) | Auto en la ingesta, navegables en provenance viewer |
 | **Imagen/figura extraction** | Extrae imágenes de papers (Mistral raster + render-crop vector) | Click en un fact → lightbox con la imagen |
 | **Detección de contradicciones** | Detecta cuando dos papers dicen cosas opuestas sobre el mismo compuesto/actividad | `/admin/contradictions` con filtro y bulk resolve |
 | **Deduplicación semántica** | Detecta facts duplicados entre papers (mismo species\|compound\|bioactivity) | Auto-merge, pero reversible vía unmerge |
-| **Compound authority table** | ~50 compuestos marinos curados + PubChem lookup automático, alias resolution | Backend, badge en fact detail |
 | **Provenance viewer** | Click en un fact → abre la página exacta del PDF con bbox highlight | Ctrl+click abre en tab |
 | **Re-evaluation button** | Botón "check for updates" en un discovery para detectar papers nuevos relevantes | `/discoveries/:id/reevaluate` |
 | **Cost guard rails** | Hard/soft caps diarios/mensuales para Mistral OCR y PubChem | Env vars + admin drill-down `/admin/cost-totals` |
-| **Discovery persistence** | Insights noveles se persisten con version history, soft-delete, FK a evidencia | Discovery agent, dual-write DB+JSONB |
-| **Knowledge graph v1** | "Mostrame todo lo que sabemos del compound X" — search endpoint con stats | `/api/research-brain/graph/compounds/search` |
 | **Admin review UI** | Panel `/admin` con 3 tabs: Contradictions, Dedup, Stats | Auth-gated, role: admin |
+| **Knowledge graph search** | "Mostrame todo lo que sabemos del compound X" — search endpoint con stats | `/api/research-brain/graph/compounds/search` |
+| **Co-occurrence RPC** | "Qué otros compounds co-aparecen con X en papers" | `graph_top_co_occurring` SQL RPC |
+| **String-bucket RPC** | "Top geographies / bioactivities de un compound" | `graph_top_string_field` SQL RPC |
+| **Status endpoint** | Health del servicio + estado del job queue | `GET /api/health` |
+| **Version endpoint** | Versión + SHA + build date del container | `GET /api/version` (en Footer del cliente) |
+| **Activity Log con elapsed timer** | Deep-research UI muestra qué paso corre ahora + cuánto lleva | Panel en `ResearchStatePanel` |
+| **Compound Authority worker** | BullMQ worker que llama PubChem cada 6h para resolver compounds `pending` | Auto en background, container `bioagents-worker` |
+| **Contradi­ction stats RPC** | "Cuántas contradicciones hay en 1d/7d por estado" | `get_contradiction_stats` SQL RPC (admin) |
+
+### ⚠️ Funcional con caveats
+
+| Feature | Caveat |
+|---|---|
+| **Compound Authority resolution** | Solo 22 compounds con canonical_id (34 facts verificados). 200 facts `failed` después de 3 reintentos de PubChem (nombres específicos del marine biology no están en PubChem). 235 `pending` con attempts++. Backfill corre cada 6h. |
+| **Discovery persistence** | Tabla `research_discoveries` existe pero está vacía. El agente escribe discoveries pero ningún consumer los lee aún. Read-side migration pendiente. |
+| **Knowledge graph** | Solo cubre 22 compounds (los que PubChem conoció). El endpoint funciona pero el corpus visible es chico. |
 
 ### ❌ Lo que NO está en producción (work in progress)
 
@@ -39,44 +52,81 @@ BioAgents es un **AI Scientist Framework** para bioprospecting. Los usuarios sub
 - **LLM semantic linker** (KG PR #3): no implementado
 - **RLHF en fact extraction**: no hay feedback loop
 - **Compound authority v2** (más curadores, más compuestos): frozen en v1
+- **Edit/annotation en provenance viewer**: tabla viewer es read-only
+
+---
+
+## Sesión del 17 de junio — Logros
+
+Esta sesión cerró el gap entre el diseño y la realidad operativa. Cambios concretos:
+
+### Bug fixes (8)
+
+1. **Traefik routing** — container `bioagents-caddy` perdió la conexión al network `coolify`. Fix: `docker network connect coolify bioagents-caddy`.
+2. **Status label crash** — `statusLabel(undefined)` tiraba en UI. Fix: guarda `if (!status) return "—"`.
+3. **Migraciones faltantes** — 4 migraciones críticas no se aplicaron (`daily_api_usage`, `record_api_call`, `graph_top_co_occurring`, `graph_top_string_field`). Aplicadas con `psql` desde el host.
+4. **RAG "evidencia insuficiente"** — bug end-to-end en deep-research: `searchClaims` usaba `textSearch` con config `english` que no maneja acentos; knowledge agent truncaba chunks a 300 chars. Rewrites completos + extractor prompt fix.
+5. **`useEffect` no defined** — `ResearchStatePanel` import faltante que rompía render. Fix: agregar import.
+6. **`get_contradiction_stats` RPC rota** — la migración original referenciaba `resolution_status`/`created_at`/`dismissed_at` que no existen. Fix: nueva migración `20260617000000` con `CREATE OR REPLACE FUNCTION`.
+7. **Env vars `environment:` sobreescribían `env_file:`** — `${VAR:-}` con empty default blankeaba vars de .env. Documentado.
+8. **Mermaid en `FLOW_COMPARISON.md`** — los diagramas son Mermaid puro, se ven bien en GitHub/VSCode con extensión.
+
+### Features nuevas (3)
+
+1. **`bioagents-worker` container** — BullMQ workers (chat, deep-research, bioprospecting, document-ingestion, file-process, paper-generation, compound-authority) corren como proceso separado. Antes el código existía pero no había process.
+2. **Compound-authority repeat tick** — el worker registra un job cada 6h. Antes la queue nunca corría porque nadie llamaba a `getCompoundAuthorityQueue()`.
+3. **`FLOW_COMPARISON.md`** — diagrama Mermaid del flujo actual vs spec, tabla de 8 diffs, recap de bugs. Para próximos mantenedores.
+
+### Métricas nuevas (corpus de prueba)
+
+- 12 papers Marine Drugs ingestados (`docs/marinedrugs/`)
+- 32 research sources totales (16 deep-research memories + 14 papers + 2 markdown)
+- 1,123 evidence chunks
+- 482 bioprospecting facts
+- 22 canonical compounds + 23 aliases + 34 verified facts
+- **End-to-end query validado**: "Qué anthoteibinenes tienen actividad antifúngica?" devuelve IC50 7.7–9.1 μg/mL para anthoteibinene J, anthoteibinene K inactivo (sin phenol), anthoteibinene I débil a 50 μg/mL, con DOI a `marinedrugs-23-00044.pdf`.
 
 ---
 
 ## Casos de Uso End-to-End
 
-### Caso 1: Investigador busca "curcumin + Alzheimer"
+### Caso 1: Investigador busca "anthoteibinenes antifúngicas"
 
-1. Usuario entra a `/library`, sube 3 papers de PubMed sobre curcumin y Alzheimer
-2. Sistema ingesta en background (30-60s por paper)
-3. Bioprospecting extractor corre LLM sobre cada paper → extrae ~10 facts/paper
-4. Compound authority lookup: "curcumin" matchea con `PubChem CID 969516` (via ~50 seed curados o PubChem)
-5. Tabla extraction detecta "Table 2: Bioactivity summary" → extrae como markdown
-6. Usuario ve en `/research-brain` la lista de facts: "Curcumin inhibits Aβ aggregation (IC50 0.5μM)", "Curcumin reduces tau phosphorylation", etc.
-7. Click en un fact → provenance viewer abre el PDF en la página exacta, con el chunk resaltado en amarillo
-8. Si dos papers dicen cosas contradictorias (e.g., "Curcumin promotes Aβ clearance" vs "Curcumin has no effect on Aβ"), `/admin/contradictions` muestra la pair con un botón "Resolve"
-9. Usuario busca "curcumin" en `/api/research-brain/graph/compounds/search` → ve stats: 3 papers, 8 facts, 2 claims contradicted, top bioactivities: "anti-inflammatory, neuroprotective"
-10. Usuario pregunta al chat "¿qué se sabe de curcumin y Alzheimer?" → deep research corre planning → execute → hypothesis → reflection → **discovery** (insight novel, persistido en DB)
+> Caso de uso validado end-to-end en esta sesión.
+
+1. Usuario entra al chat, selecciona modo "deep research", escribe la query
+2. API encola job en BullMQ → worker `deep-research` lo procesa
+3. **Planning agent** descompone en tareas (literature search)
+4. **Literature agent** hace fan-out: OpenScholar (externo), Edison (externo), **Knowledge agent (local)** — este último busca en `research_evidence_chunks` con embeddings
+5. Knowledge agent encuentra 5-20 chunks relevantes del paper `marinedrugs-23-00044.pdf` (Anthoteibinenes F-Q)
+6. **Hypothesis agent** recibe los chunks + corre `searchClaims()` con ilike-per-term para encontrar claims soportados
+7. Hypothesis genera texto con IC50, SAR (estructura-actividad), DOI, citando evidencia chunk-por-chunk
+8. Usuario ve en chat: key insights, evidence pack, hypothesis, methodology, **Activity Log** con timer
+
+**Resultado concreto** (logged):
+- IC50 7.7–9.1 μg/mL para anthoteibinene J contra Candida albicans (4 cepas)
+- Anthoteibinene K inactivo — explicación estructural: "lacks the phenol functional group"
+- Anthoteibinene I activo solo a 50 μg/mL
 
 ### Caso 2: Reviewer quiere validar un claim controversial
 
 1. Admin entra a `/admin`, tab "Contradictions"
-2. Ve: "5 contradicciones sin resolver, 2 en curcumin, 1 en DHA, 2 misceláneas"
+2. Ve: "0 contradicciones detectadas" (todavía — el detector corre pero no se generaron pairs en el corpus de prueba)
 3. Click en una → ve los 2 facts en conflicto con sus sources, bboxes en el PDF, claim chains
-4. Decide: "el paper A es más reciente y tiene mejor metodología" → click "Resolve" + reason: "manual review: paper A supersedes"
-5. Sistema actualiza: contradiction.status = 'resolved', escribe audit row
-6. Si era un falso positivo del detector (no era realmente contradicción) → click "Dismiss" en su lugar
-7. Bulk: si hay 10 contradicciones del mismo paper, marca los 10 checkboxes → "Resolve selected"
+4. Decide: "el paper A es más reciente" → click "Resolve" + reason: "manual review: paper A supersedes"
+5. Sistema actualiza: `contradiction.status = 'resolved'`, escribe audit row, `resolved_at = NOW()`
+6. Si era un falso positivo → click "Dismiss" en su lugar
+7. **Stats tab** muestra: 0 contradicciones activas (vía `get_contradiction_stats` RPC con ventana 1d/7d)
 
-### Caso 3: Investigador vuelve a una conversación vieja
+### Caso 3: Investigador busca "curcumin" en el knowledge graph
 
-1. Usuario abre una conversación de hace 2 meses sobre "DHA + inflamación"
-2. Sistema carga el contexto histórico, incluyendo **discoveries** persistidos
-3. Usuario ve: "Discovery: DHA reduces IL-6 via NF-κB pathway (v2, confirmed by 2024 meta-analysis)"
-4. Hace click en "check for updates" en el discovery
-5. Sistema busca papers nuevos desde `last_checked_at`, hace LLM call: "¿algún paper nuevo contradice o extiende este claim?"
-6. Resultado: "Clean" (no hay papers relevantes) o "Extended" (nueva evidencia) o "Contradicted" (nuevo paper desmiente)
-7. Si hay cambio, sistema crea nueva versión (`v3`), marca `v2` como `superseded`, escribe audit row
-8. En el futuro, un BullMQ worker correrá semanalmente para hacer este check automáticamente
+1. Usuario entra a `/api/research-brain/graph/compounds/search?query=curcumin`
+2. Backend corre `searchCompounds()` en `research_graph_compound_aggregates`
+3. Devuelve: lista de compounds que matchean "curcumin" con `fact_count`, `source_count`, `last_seen_at`
+4. Click en uno → GET `/api/research-brain/graph/compounds/{id}/co-occurring?limit=5` → top 5 compounds que co-aparecen
+5. Click en uno → GET `/api/research-brain/graph/compounds/{id}/bioactivities` → top bioactivities (vía `graph_top_string_field` RPC)
+
+> En el corpus actual: 22 compounds visibles (los que PubChem conoció). Curcumin no está en el corpus Marine Drugs, así que devuelve `[]`. Para verlo, ingestar papers sobre curcumin.
 
 ---
 
@@ -89,7 +139,7 @@ User query
    ↓
 Planning Agent (LLM) → plan de tareas (PlanTask en JSONB)
    ↓
-Execute Tasks (workers BullMQ) → ejecutan extracción, búsqueda, análisis
+Execute Tasks (BullMQ workers) → ejecutan extracción, búsqueda, análisis
    ↓
 Hypothesis Agent (LLM) → genera claim tentativo basado en outputs
    ↓
@@ -107,30 +157,41 @@ Reply to user
 
 ```
 research_sources (papers)
-  ├── research_evidence_chunks (text chunks con embeddings)
-  ├── research_evidence_tables (tablas extraídas, bbox, multi-page chains)
-  │     └── research_bioprospecting_facts ←──┐
-  │           ├── evidence_table_id (FK)     │ composición canónica
-  │           ├── compound_authority_status  │
-  │           └── ...                        │
-  ├── research_evidence_figures (figuras, bbox, extracted image)
-  ├── research_claims (semantic claims, supported/contradicted/partial)
-  │     ├── research_bioprospecting_contradictions (cross-paper contradictions)
-  │     └── research_edges (generic edge table)
-  └── research_discoveries (insights, version history, soft-delete) ← v1+
-        └── research_discovery_evidence (FKs a evidence)
-        └── research_discovery_reeval_audit (forward-compat, empty in v1)
+   ├── research_evidence_chunks (text chunks con embeddings)
+   ├── research_evidence_tables (tablas extraídas, bbox, multi-page chains)
+   │     └── research_bioprospecting_facts ←──┐
+   │           ├── evidence_table_id (FK)     │ composición canónica
+   │           ├── compound_authority_status  │   pending/verified/failed/skipped
+   │           ├── compound_canonical_id (FK) │
+   │           └── ...                        │
+   ├── research_evidence_figures (figuras, bbox, extracted image)
+   ├── research_claims (semantic claims, supported/contradicted/partial)
+   │     ├── research_bioprospecting_contradictions (cross-paper contradictions)
+   │     └── research_edges (generic edge table)
+   └── research_discoveries (insights, version history, soft-delete) ← v1+
+         └── research_discovery_evidence (FKs a evidence)
+         └── research_discovery_reeval_audit (forward-compat, empty in v1)
 research_taxa + research_taxon_aliases (species canonical)
 research_compounds + research_compound_aliases (compound canonical, PubChem-backed)
 research_graph_compound_aggregates (materialized view, KG v1)
+  └── refresh_compound_aggregates() — soft-fail RPC
+  └── graph_top_co_occurring() — query-time CTE
+  └── graph_top_string_field() — geography/bioactivity buckets
+daily_api_usage + record_api_call() — cost tracking
+research_bioprospecting_dedup_audit — soft-delete merge history
 ```
 
-### Workers BullMQ
+### Workers BullMQ (en container `bioagents-worker`)
 
-- **document-ingestion**: PDF → chunks + tables + figures
-- **bioprospecting**: chunks → facts (LLM extraction)
-- **compound-authority**: scheduled cada 6h, PubChem lookup
-- **deep-research**: orchestrates planning → execute → hypothesis → reflection → discovery
+| Worker | Trigger | Concurrency | Notas |
+|---|---|---|---|
+| `chat` | POST /api/chat (con queue) | 5 | |
+| `deep-research` | POST /api/deep-research/start | 3 | Orquestador principal |
+| `bioprospecting` | Encolado por document-ingestion | 1 | LLM extraction de chunks |
+| `document-ingestion` | POST /api/research-brain/ingest | 2 | PDF → chunks + tables + figures |
+| `compound-authority` | Repeat cada 6h | 1 | PubChem backfill |
+| `file-process` | Upload directo | 5 | |
+| `paper-generation` | POST /api/deep-research/.../paper | 1 | LaTeX compile |
 
 ---
 
@@ -167,7 +228,7 @@ research_graph_compound_aggregates (materialized view, KG v1)
 | 6 | **Multi-language papers** (es, pt) | M (1-2 días) | Bioprospecting sudamericano es nuestro nicho |
 | 7 | **Edit/annotation en provenance viewer** | M (1-2 días) | Investigador puede marcar cells de tabla con notas |
 | 8 | **Compound authority v2** (more curators) | M (1-2 días) | +500 compuestos curados, más idiomas |
-| 9 | **Per-source cap math** (cost-guard-rails follow-up) | S (1 día) | Per-source caps que actualmente no se disparan |
+| 9 | **Resolver fallos de PubChem** (200 facts `failed`) | M (1-2 días) | Algunos son nombres reales que PubChem tiene bajo otro alias — necesita heurística de búsqueda alternativa |
 | 10 | **Auth resolver: role `researcher`** | S (1 día) | Relajar el "todo es admin" |
 
 ### 🟢 Baja prioridad / especulativo
@@ -190,31 +251,49 @@ La #2 (read migration) es técnica pero habilita las #3 y #4 (KG extensions) sin
 
 | Métrica | Valor |
 |---|---|
-| Commits ahead de `origin/dev` (local) | 60 |
-| OpenSpec changes archivados | 14 |
+| Commits ahead de `origin/dev` (local) | 71 |
+| Total commits en `dev` | 623 |
+| OpenSpec changes archivados | 8 (ver lista abajo) |
 | OpenSpec capabilities en main specs | 13 |
-| Tests passing | 594 |
-| Tests failing | 1 (env-dependent, pre-existing) |
+| Tests passing | 591 |
+| Tests failing | 4 (3 en dedup + 1 contradictionLlM env-dependent) |
 | Tests skipped | 7 |
-| Total LOC (producción + tests) | ~50,000+ estimado |
+| LOC producción | 57,449 |
+| LOC tests | 17,304 |
 | Lenguaje principal | TypeScript (Bun runtime) |
 | Base de datos | Postgres via Supabase |
 | Job queue | BullMQ (Redis) |
 | Storage | S3 (PDFs, extracted images) |
+| Workers containers | 1 (`bioagents-worker`, 7 BullMQ workers adentro) |
+| Corpus actual | 12 papers Marine Drugs, 32 sources, 1,123 chunks, 482 facts |
 
-### Changes archivados (14)
+### Corpus bioprospecting actual (snapshot)
+
+| Métrica | Valor |
+|---|---|
+| research_sources (papers) | 32 |
+| research_evidence_chunks | 1,123 |
+| research_bioprospecting_facts | 482 |
+| └ verified (canonical_id asignado) | 34 (7%) |
+| └ pending (con attempts++) | 235 (49%) |
+| └ failed (maxRetries alcanzado) | 200 (41%) |
+| └ skipped (extracts/mixtures) | 13 (3%) |
+| research_compounds (canonical) | 22 |
+| research_compound_aliases | 23 |
+| research_graph_compound_aggregates (KG v1) | 22 |
+| research_bioprospecting_contradictions | 0 (ninguna detectada aún) |
+| research_discoveries | 0 (ninguna persistida aún) |
+
+### Changes archivados (8)
 
 1. `bioprospecting-semantic-dedup` — identity_key + edge table + backfill
-2. `bioprospecting-contradiction-detection` — rule-based + LLM pass + evidence pack warnings
-3. `bioprospecting-pdf-provenance-viewer` — custom pdfjs-dist@5 detector + PDF.js viewer + lightbox
-4. `bioprospecting-compound-authority` — ~50 seed + PubChem lookup + audit
-5. `bioprospecting-multipage-table-merge` — 3 modes (hard/hard-confidence/manual) + admin override
-6. `bioprospecting-image-extraction` — Mistral raster + render-crop vector
-7. `cost-guard-rails` — daily/monthly caps + soft-fail + admin drill-down
-8. `bioprospecting-knowledge-graph` v1 — compound-centric aggregates + search
-9. `bioprospecting-review-ui` — admin page (Contras + Dedup + Stats)
-10. `discovery-persistence` v1 — relational discoveries + dual-write
-11-14. misc infra: test pollution fix, extractJsonArray fix, archive cleanups, CLAUDE.md updates
+2. `bioprospecting-pdf-provenance-viewer` — custom pdfjs-dist@5 detector + PDF.js viewer + lightbox
+3. `bioprospecting-compound-authority` — seed + PubChem lookup + audit
+4. `bioprospecting-knowledge-graph` v1 — compound-centric aggregates + search
+5. `cost-guard-rails` — daily/monthly caps + soft-fail + admin drill-down
+6. `bioprospecting-figure-image-extraction` — Mistral raster + render-crop vector
+7. `bioprospecting-review-ui` — admin page (Contradictions + Dedup + Stats)
+8. `discovery-persistence` v1 — relational discoveries + dual-write
 
 ### Capabilities en main specs (13)
 
@@ -229,6 +308,13 @@ Las opciones concretas para el próximo cambio, en orden de valor:
 1. **#1 Re-evaluation scheduled worker** (PR #3 de discovery persistence) — 1-2 días, completa el ciclo
 2. **#3 Read migration** (PR #2 de discovery persistence) — 1-2 días, habilita KG extensions
 3. **#4 Entity mention graph** (PR #2 de knowledge graph) — 1-2 días, extiende KG
-4. **#5 Citation graph cross-paper** — 3-5 días, conecta papers via shared compounds
+4. **#9 Resolver fallos de PubChem** — algunos de los 200 `failed` tienen alias válidos pero mal escritos en el paper. Heurística de búsqueda fuzzy podría recuperar ~50-80 de ellos.
+5. **#5 Citation graph cross-paper** — 3-5 días, conecta papers via shared compounds
 
-Si querés arrancar con uno, decime cuál. Si querés descansar, este documento es el snapshot del estado al 16 de junio de 2026.
+Si querés arrancar con uno, decime cuál. Si querés descansar, este documento es el snapshot del estado al **17 de junio de 2026**.
+
+## Documentos relacionados
+
+- `FLOW_COMPARISON.md` — diagrama del flujo actual vs spec'd (creado esta sesión)
+- `openspec/specs/research-bioprospecting/spec.md` — spec principal de bioprospecting
+- `openspec/changes/` — directorio de cambios en flight + archive

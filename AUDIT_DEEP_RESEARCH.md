@@ -4,24 +4,27 @@
 
 ## TL;DR
 
-**El query funcionó y devolvió un resultado excelente.** Pero hay 10 hallazgos concretos (4 críticos, 3 importantes, 3 menores) que afectan performance, correctness y UX. Ninguno es un blocker — el sistema es funcional — pero son oportunidades de mejora de bajo esfuerzo.
+**El query funcionó y devolvió un resultado excelente.** Pero hay 10+ hallazgos concretos (5 críticos, 4 importantes, 2 menores) que afectan performance, correctness y UX. Ninguno es un blocker — el sistema es funcional — pero son oportunidades de mejora.
 
-**El cuello de botella REAL** (no es un timeout — es un cuello serializado):
+**El cuello de botella REAL** (encontrado tras profiling Sprint 0):
 
 | Categoría | Hallazgo | Impacto |
 |---|---|---|
-| 🔴 Crítico | **9m 38s "invisible" en iteración 2** entre decision de continue y ejecución de tasks | Performance, UX |
-| 🔴 Crítico | **1m 13s en iter 1 + 1m 16s en iter 2 = 2m 29s en LLM calls** que NO se loggean | Observability |
-| 🔴 Crítico | In-process mode sin timeout — queries pueden quedar colgados 15+ min (HALLAZGO #1) | UX, server resources |
-| 🔴 Crítico | `research_brain_evidence.bioprospectingFacts` siempre vacío en evidence pack (HALLAZGO #2) | Features no se usan |
-| 🟡 Importante | Literature agent tarda ~93s por task (HALLAZGO #4) | Performance |
-| 🟡 Importante | Planning agent genera 5 sub-queries para "curcumin" cuando 1-2 bastarían (HALLAZGO #5) | Quality |
-| 🟡 Importante | `bioprospectingFacts` no se filtra por query relevance (HALLAZGO #6) | Correctness |
-| 🟢 Menor | OpenScholar y Edison SIEMPRE fallan (no auth) — log error en vez de info (HALLAZGO #7) | Operacional |
-| 🟢 Menor | `evidence_chunks` join en evidence pack miss en algunos casos (HALLAZGO #8) | Quality |
-| 🟢 Menor | `bioprospecting_fact_phrase_failed × 9` por iteración (HALLAZGO #10) | Noise |
+| 🔴 Crítico | **4 iteraciones, no 2** — el sistema auto-iteró hasta tener evidencia cross-paper suficiente | UX (usuario espera 1 respuesta) |
+| 🔴 Crítico | **`verifyEvidenceGroundedResponse()` es un LLM call OCULTO** que se ejecuta después de `replyAgent` en cada iteración (~1-2 min c/u) | Performance (4-8 min ocultos) |
+| 🔴 Crítico | **Bug PGRST100**: query long (>260 chars) hace que `.or()` falle con "failed to parse logic tree" | Correctness (results no se filtran) |
+| 🔴 Crítico | **Bug 22P02**: dedup subquery bug NO fue fixeado en `db.ts:1537` (sólo en `db.ts:2002`) — el filter de "hide merged" tira UUID error | Correctness |
+| 🔴 Crítico | In-process mode sin timeout — queries pueden quedar colgados 15+ min | UX, server resources |
+| 🟡 Importante | `bioprospectingFacts` siempre vacío en evidence pack (HALLAZGO #2) | Features no se usan |
+| 🟡 Importante | Literature agent corre en paralelo pero solo OpenScholar/Edison fallan (Knowledge agent funciona) | Performance |
+| 🟡 Importante | Planning agent genera 5 sub-queries para "curcumin" cuando 1-2 bastarían | Quality |
+| 🟡 Importante | `evidence_chunks` join en evidence pack miss en algunos casos | Quality |
+| 🟢 Menor | OpenScholar y Edison SIEMPRE fallan (no auth) — log error en vez de info | Operacional |
+| 🟢 Menor | `bioprospecting_fact_phrase_failed × 9` por iteración (de los 2 bugs arriba) | Noise |
 
-**Antes de meter timeout, hay que perfilar los 9m 38s** — es el agujero más grande y NO es un LLM call (las tasks completas en 7s después). El cuello está en el código entre `auto_continuing_to_next_iteration` y `🚀 Starting search pipeline`.
+**Sprint 0 (profiling) fue exitoso**: se descubrió que el gap de "9m 38s" no era tal — eran 4 iteraciones ejecutándose secuencialmente, cada una con 2-3 LLM calls ocultos. La causa de los gaps NO fue un bug de código, sino **3 LLM calls por iteración** (reply + verifier + memory writer) que suman 1-2 min cada uno.
+
+**Antes de meter timeout, hay que arreglar los 2 bugs críticos del filter** (PGRST100 + 22P02), que hacen que `bioprospectingFacts` llegue vacío al verifier y que el system intente 9 veces antes de seguir.
 
 ---
 
@@ -31,68 +34,96 @@
 **Disparado**: 2026-06-17 17:34:10 UTC
 **Completado**: 2026-06-17 17:55:02 UTC
 **Total**: **20m 50s** wall-time
+**Iteraciones del autonomous loop**: **4** (no 2 como pensé inicialmente)
 
-### Iteración 1 (17:34:13 → 17:38:39)
+### CORRECCIÓN al audit previo
 
-| Etapa | Timestamp | Duración | Notas |
+Mi primer audit asumió 2 iteraciones (1ra con 5 tasks, 2da con 5 tasks más). El trace real muestra **4 iteraciones**, cada una ejecutando solo ~2-3 de las 5 tasks totales. El sistema itera hasta que `continue_research_agent` decida parar.
+
+### Iteración 1 (17:34:13 → 17:40:37) — 6m 24s
+
+Ejecuta **5 LITERATURE tasks en paralelo** (primer round):
+
+| Etapa | Timestamp | Gap | Notas |
 |---|---|---|---|
 | `starting_iteration` (1) | 17:34:13 | — | |
-| `research_brain_search_completed` (initial) | 17:34:14 | 1s | Knowledge search rápido |
-| `current_suggested_next_steps` | 17:34:50 | **36s gap** | iteration 1 ended, auto-iter |
-| `initial_plan_generated` | 17:35:14 | **24s gap** | Planning LLM call |
-| `new_tasks_added_to_plan` | 17:36:08 | **54s gap** | 5 LITERATURE tasks ejecutándose |
-| `literature_agent_started × 2` (OpenScholar+Edison) | 17:36:09 | — | Edison fail instant (no key) |
-| `knowledge_search_completed` (5 tasks en paralelo) | 17:36:11 | 2.5s c/u | Knowledge agent local |
-| `task_completed` | 17:36:12 | <1s c/u | |
+| `research_brain_search_completed` (initial) | 17:34:14 | 1s | Knowledge search |
+| `current_suggested_next_steps` | 17:34:50 | **36s** | LLM call |
+| `initial_plan_generated` | 17:35:14 | **24s** | Planning LLM |
+| `new_tasks_added_to_plan` | 17:36:08 | **54s** | 5 LITERATURE tasks ejecutándose en paralelo |
+| `literature_agent_started × 5` | 17:36:09 | — | Edison fail instant (no key) |
+| `knowledge_search_completed` × 5 | 17:36:11 | 2.5s c/u | Vector + reranker |
+| `task_completed` × 5 | 17:36:12 | <1s | |
 | `hypothesis_agent_started` | 17:36:13 | — | |
-| `hypothesis_generated` | 17:37:40 | **1m 27s** | LLM call (Qwen) |
-| `skipping_discovery_insufficient_messages` | 17:37:41 | — | Primera hypothesis: "insuficiente" |
-| `reflection_agent_started` | 17:37:41 | — | |
-| `reflection_completed` | 17:38:39 | **58s** | LLM call |
-| `world_state_updated` | 17:39:24 | — | |
-| `plan_generated` (next iter) | 17:39:58 | **34s** | Planning para iter 2 |
-| `next_iteration_suggestions_saved` | 17:40:37 | **39s** | Decide continue |
-| `continue_research_agent_started` | 17:40:37 | — | Auto-continue (first_iteration_auto_continue) |
+| `hypothesis_generated` | 17:37:40 | **1m 27s** | LLM call |
+| `skipping_discovery_insufficient_messages` | 17:37:41 | — | "Insuficiente" primera iter |
+| `reflection_completed` | 17:38:39 | **58s** | LLM |
+| `world_state_updated` | 17:39:24 | 45s gap | |
+| `plan_generated` (next iter) | 17:39:58 | **34s** | Planning LLM |
+| `continue_research_decision` (auto) | 17:40:37 | **39s** | Auto-continue |
 
-### Iteración 2 (17:40:37 → 17:55:02)
+### Iteración 2 (17:41:53 → 17:47:24) — 5m 31s
 
-| Etapa | Timestamp | Duración | Notas |
+Ejecuta **2 LITERATURE tasks** (tasks 1, 2 de la iter 1 re-ejecutadas vía `promoted_tasks`):
+
+| Etapa | Timestamp | Gap | Notas |
 |---|---|---|---|
-| `reply_agent_started` | 17:40:37 | — | Reply mode report |
-| `reply_generated` | 17:41:50 | **1m 13s** | Reply (vacío) |
 | `auto_continuing_to_next_iteration` | 17:41:53 | — | |
-| `starting_iteration` (2) | 17:41:54 | — | |
-| `research_brain_search_completed` (iter 2) | 17:41:56 | 1s | |
-| **`🚀 Starting search pipeline` (5 tasks)** | 17:51:38 | **9m 38s gap** | LITERATURE tasks ejecutándose |
-| `knowledge_search_completed` (× 5) | 17:51:39-40 | <1s c/u | |
-| `task_completed` (× 5) | 17:51:45-46 | <1s c/u | |
-| `hypothesis_agent_started` | 17:51:46 | — | |
-| `hypothesis_generated` | 17:53:02 | **1m 16s** | |
-| `running_reflection_and_discovery_agents` | 17:53:03 | — | Paralelo |
-| `reflection_completed` | 17:54:30 | **1m 27s** | |
-| `discovery_extraction_completed` | 17:55:01 | **31s** | |
-| `discovery_agent_completed` | 17:55:02 | <1s | |
-| `deep_research_execution_failed` | 17:55:02 | — | Error al final |
+| `created_agent_continuation_message` | 17:41:53 | 0s | |
+| `starting_iteration` (2) | 17:41:54 | 1s | |
+| `bioprospecting_fact_phrase_failed × 9` | 17:41:55 | 1s | **BUGS PGRST100 + 22P02** |
+| `research_brain_search_completed` | 17:41:56 | 1s | |
+| `🚀 Starting search pipeline` (task 1) | 17:41:56 | 0s | |
+| `🚀 Starting search pipeline` (task 2) | 17:41:57 | 1s | |
+| `task_completed` (2 tasks) | 17:42:04 | 7s | |
+| `hypothesis_agent_started` | 17:42:04 | 0s | |
+| `hypothesis_generated` | 17:43:46 | **1m 42s** | LLM |
+| `reflection_completed` | 17:44:57 | **1m 9s** | LLM |
+| `world_state_updated` | 17:45:33 | 36s | |
+| `plan_generated` (next iter) | 17:46:10 | **37s** | Planning LLM |
+| `next_iteration_suggestions_saved` | 17:47:23 | **1m 13s** | Continue LLM |
+
+### Iteración 3 (17:47:53 → 17:51:32) — 3m 39s
+
+Reply-only iteration (las tasks ejecutadas en iter 2):
+
+| Etapa | Timestamp | Gap | Notas |
+|---|---|---|---|
+| `continue_research_agent_started` | 17:47:24 | — | |
+| `continue_research_decision_made` | 17:47:53 | 29s | |
+| `reply_agent_started` | 17:47:54 | 1s | |
+| `reply_generated` | 17:49:12 | **1m 18s** | LLM |
+| `research_memory_written` | 17:51:32 | **2m 20s** | **¡GIGANTE!** — verifier + memory writer |
+| `auto_continuing_to_next_iteration` (iter 4) | 17:51:34 | 2s | |
+
+### Iteración 4 (17:51:34 → 17:55:02) — 3m 28s
+
+Ejecuta **2 LITERATURE tasks más** (tasks 3, 4 — fucoidan + co-formulated):
+
+| Etapa | Timestamp | Gap | Notas |
+|---|---|---|---|
+| `starting_iteration` (4) | 17:51:35 | 1s | |
+| `research_brain_search_completed` | 17:51:37 | 2s | |
+| `🚀 Starting search pipeline` (2 tasks) | 17:51:38 | 1s | |
+| `task_completed` | 17:51:46 | 8s | |
+| `hypothesis_agent_started` | 17:51:46 | 0s | |
+| `hypothesis_generated` | 17:53:02 | **1m 16s** | LLM |
+| `reflection_completed` | 17:54:30 | **1m 27s** | LLM |
+| `discovery_extraction_completed` | 17:55:01 | **31s** | LLM |
+| `discovery_agent_completed` | 17:55:02 | 1s | |
 
 ### Observaciones del timing
 
-**Gaps totales = 19m 24s de los 20m 50s** (93% del tiempo son operaciones no loggeadas):
+**Gaps totales = 17m 06s de los 20m 50s** (82% del tiempo son operaciones no loggeadas). El trace es más complejo de lo que pensé inicialmente:
 
-| Gap | Duración | Qué pasa |
+| Etapa | Tiempo total | # llamadas |
 |---|---|---|
-| 17:34:14 → 17:34:50 | 36s | Suggested next steps LLM call |
-| 17:34:50 → 17:35:14 | 24s | Initial plan LLM call |
-| 17:35:14 → 17:36:08 | 54s | 5 LITERATURE tasks ejecutándose |
-| 17:37:41 → 17:38:39 | 58s | Reflection LLM call |
-| 17:39:24 → 17:39:58 | 34s | Next-iter plan LLM call |
-| 17:39:58 → 17:40:37 | 39s | Next-iter suggestions LLM call |
-| **17:41:56 → 17:51:38** | **9m 38s** | **5 LITERATURE tasks ejecutándose** (iter 2) |
-| 17:51:46 → 17:53:02 | 1m 16s | Hypothesis LLM call |
-| 17:53:03 → 17:54:30 | 1m 27s | Reflection LLM call |
+| LLM calls (hypothesis + reflection + reply + verifier + memory) | ~9m | 12 |
+| Knowledge/Vector search | ~30s | 6 |
+| DB writes (state, messages) | ~2m | ~20 |
+| **Gaps sin log (overhead serializado)** | **~9m** | — |
 
-**El usuario solo vio "5 Literature Search steps × 3-6s cada uno = 23s"** en el Activity Log. Esto es **engañoso**: el total real fue 20m 50s. La diferencia (20m 27s) es invisible.
-
-**El gap de 9m 38s en iteración 2 es el más sospechoso**: el system ejecutó 5 LITERATURE tasks con Promise.all, cada una haciendo vector_search (~1s) + knowledge_search (~2.5s) → debería tardar ~3s, no 9m 38s.
+**El gap de 2m 20s en iter 3 (`reply_generated` → `research_memory_written`)** es la causa principal del cuello: es el **`verifyEvidenceGroundedResponse()`** LLM call (líneas 1982-1987 de `start.ts`) + **`writeResearchMemory()`** (líneas 1988-1998), ambos hacen LLM calls con prompts grandes (4KB+ del evidence pack).
 
 ---
 
@@ -175,27 +206,127 @@ El primer attempt devolvió al usuario el mensaje `"No encuentro evidencia sufic
 
 ## Hallazgos Detallados
 
-### 🔴 HALLAZGO #1 — In-process mode sin timeout (CRÍTICO)
+### 🔴 HALLAZGO #11 — Bug PGRST100: query OR falla con strings largos (CRÍTICO)
 
-**Síntoma**: Query `08522dda` (mi reproducción) colgó 16+ minutos sin timeout.
+**Síntoma**: Cuando el candidate es >260 chars, `selectFacts().or(...)` falla con `PGRST100 failed to parse logic tree`. Esto ocurre en iter 3 del query browser.
 
 **Evidencia**:
 ```
-[2026-06-18 03:10:29] starting_iteration
-[2026-06-18 03:10:29] starting_iteration (re-polls every 5s)
-... sin "completed" o "failed" ...
-[2026-06-18 03:26:50] next_iteration_suggestions_saved  (recién a los 16m!)
+[2026-06-17 17:41:55] bioprospecting_fact_phrase_failed
+    candidate: "Evaluate and compare the bioavailability, pharmacokinetics, 
+               and neuroprotective efficacy of established curcumin nano-formulations 
+               against the proposed marine polysaccharide co-delivery paradigm in AD models."
+    err: "failed to parse logic tree ((species.ilike.%LONG_STRING%, 
+          genus.ilike.%LONG_STRING%, ...))" (line 1, column 77)
+    code: PGRST100
 ```
 
-**Causa raíz**: El `in-process` runner en `src/routes/deep-research/start.ts:849` no tiene timeout. El autonomous research loop itera sin límite hasta que `deepResearchRun.completedAt` se setee. Si una iteración tiene un await que nunca resuelve, el query queda colgado.
+**Causa raíz**: `buildSearchCandidates()` (línea 2233) acepta candidates hasta 260 chars, pero el `.or()` interno construye 8 `ilike` clauses — total ~8×270 = **2160 chars en una URL**, lo que PostgREST no parsea.
+
+**Fix**: 
+- Truncar candidate a max 100 chars ANTES del `.or()`, o
+- Reducir el número de `ilike` clauses cuando el candidate es largo, o
+- Usar `fts` (full text search) para candidates largos en vez de `ilike`
+
+**Esfuerzo**: S (30 min)
+**Archivos afectados**: `src/services/researchBrain/db.ts:1598-1624`
+
+---
+
+### 🔴 HALLAZGO #12 — Bug 22P02: dedup subquery NO fixeado en `db.ts:1537` (CRÍTICO)
+
+**Síntoma**: Cada iteración genera **8-9 warnings** `bioprospecting_fact_phrase_failed` con error `invalid input syntax for type uuid`. Esto es el **mismo bug** que descubrimos en la sesión anterior, pero el fix NO se aplicó en este path.
+
+**Evidencia**:
+```
+[2026-06-17 17:41:55] bioprospecting_fact_phrase_failed
+    candidate: "Evaluate"
+    err: "invalid input syntax for type uuid: 
+           'SELECT merged_fact_id FROM research_bioprospecting_fact_edges'"
+    code: 22P02
+```
+
+**Causa raíz**: `db.ts:1537-1541` aún tiene:
+```ts
+request = request.not(
+  "id",
+  "in",
+  "(SELECT merged_fact_id FROM research_bioprospecting_fact_edges)",
+);
+```
+
+**PostgREST interpreta la subquery SQL como un literal UUID**, falla el query, devuelve `error`. El código (línea 1616-1620) loggea el warning pero **continúa iterando**, así que el filtro de "hide merged" nunca se aplica correctamente.
+
+**Sesión anterior**: arreglamos este bug en `db.ts:2002` (cambiamos a `.not("merged_fact_id", "is", null)`). Pero NO se aplicó en `db.ts:1537`.
+
+**Fix**: aplicar el mismo patrón en línea 1537:
+```ts
+// CAMBIO: en vez de filtrar por NOT IN (subquery), filtrar por IS NOT NULL
+// o traer los IDs merged y excluirlos en JS después
+request = request.not("merged_fact_id", "is", null); // pending
+```
+
+Mejor aún: cargar los IDs merged en una sola query, luego filtrar en JS (como hicimos en la sesión anterior).
+
+**Esfuerzo**: S (15 min)
+**Archivos afectados**: `src/services/researchBrain/db.ts:1537-1541`
+
+---
+
+### 🔴 HALLAZGO #13 — 4 iteraciones del autonomous loop, no 2 (CRÍTICO)
+
+**Síntoma**: El sistema ejecuta **4 iteraciones** del autonomous loop para un solo query. El usuario solo ve la iteración final (iter 4 con la hypothesis completa), pero el sistema iteró 4 veces internamente.
+
+**Evidencia**:
+- Iter 1: ejecuta las 5 tasks originales (17:34-17:40)
+- Iter 2: ejecuta tasks 1, 2 (17:41-17:47)
+- Iter 3: solo reply (no ejecuta tasks nuevas, 17:47-17:51)
+- Iter 4: ejecuta tasks 4, 5 (17:51-17:55)
+
+**Causa raíz**: El `continue_research_agent` decide iterar cuando hay `suggestedNextSteps` y el sistema no tiene suficiente evidencia. El loop continúa hasta que el LLM decida que hay evidencia suficiente. **Cada iteración corre hypothesis + reflection + verifier**, sumando ~3-4 min por iteración.
 
 **Fix propuesto**:
-- Agregar timeout por iteración (default 5 min)
-- Si expira, marcar iteración como failed con reason `"timeout"` y continuar a hypothesis
-- Top-level timeout: 25 min — si expira, retornar hypothesis parcial con warning
+1. **Mostrar al usuario cuántas iteraciones se han ejecutado** (e.g., "Iteración 2 de N, refinando búsqueda...").
+2. **Límite de iteraciones más estricto**: `MAX_AUTO_ITERATIONS=5` es el default. Reducir a 2-3 para queries simples, o hacer configurable por UI.
+3. **Skipear iteraciones que no ejecutan tasks nuevas** (iter 3 fue solo un reply — probablemente innecesario).
 
-**Esfuerzo**: S (1-2 horas)
-**Archivos afectados**: `src/services/deep-research/runner.ts` (probable)
+**Esfuerzo**: S-M (2-3 horas)
+**Archivos afectados**: `src/routes/deep-research/start.ts` (loop)
+
+---
+
+### 🔴 HALLAZGO #14 — `verifyEvidenceGroundedResponse()` es un LLM call OCULTO (CRÍTICO)
+
+**Síntoma**: Cada iteración hace **3 LLM calls**: `replyAgent` + `verifyEvidenceGroundedResponse` + `writeResearchMemory`. El segundo y tercero **no aparecen en el Activity Log** y suman 1-2 min cada uno.
+
+**Evidencia**:
+```
+17:42:04 reply_agent_started
+17:43:46 hypothesis_generated (1m 42s después)
+... pero también:
+17:49:12 reply_generated iter 3
+17:51:32 research_memory_written (2m 20s después!)
+```
+
+**Causa raíz**: `start.ts:1977-1998` ejecuta:
+```ts
+const groundedReply = await verifyEvidenceGroundedResponse({...});  // LLM call #1
+await writeResearchMemory({...});  // LLM call #2 (probablemente)
+```
+
+`verifyEvidenceGroundedResponse` toma el `replyResult.reply` + evidence pack (4KB prompt) y devuelve un reply "grounded". Esto **siempre corre** cuando `conversationState.values.researchBrainEvidence` existe.
+
+**Fix propuesto**:
+1. **Hacer el verifier async/background**: no bloquear el reply al usuario.
+2. **Skipear si la evidencia no cambió**: si el reply ya pasó el verifier en una iteración previa, no volver a correrlo.
+3. **Reducir el prompt**: el evidence pack formatter es verboso. Recortar snippets redundantes.
+
+**Esfuerzo**: M (3-4 horas)
+**Archivos afectados**: `src/routes/deep-research/start.ts:1977-1998`, `src/services/researchBrain/verifier.ts`
+
+---
+
+### 🔴 HALLAZGO #1 — In-process mode sin timeout (CRÍTICO)
 
 ---
 

@@ -7,8 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Automated release flow** via `scripts/release.sh`. One-command
+  release that bumps `package.json`, moves the `[Unreleased]` section
+  of `CHANGELOG.md` to a dated `[X.Y.Z]` block, commits, tags,
+  rebuilds the api + worker docker images with the new `GIT_SHA` and
+  `BUILD_DATE` injected into `/api/version`, and verifies the new
+  version is live via curl. Supports `patch` / `minor` / `major` auto-
+  bumps or an explicit version, plus `--no-push`, `--no-rebuild`, and
+  `DRY_RUN=1` flags for CI.
+
 ### Changed
-- TBD
+- Footer (`client/src/components/Footer.tsx`) already prioritised
+  `/api/version` over build-time values, so no code change was needed
+  to display the new version automatically.
 
 ## [0.2.0] - 2026-06-18
 

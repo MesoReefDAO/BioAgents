@@ -4,18 +4,24 @@
 
 ## TL;DR
 
-**El query funcionó y devolvió un resultado excelente.** Pero hay 8 hallazgos concretos (3 críticos, 3 importantes, 2 menores) que afectan performance, correctness y UX. Ninguno es un blocker — el sistema es funcional — pero son oportunidades de mejora de bajo esfuerzo.
+**El query funcionó y devolvió un resultado excelente.** Pero hay 10 hallazgos concretos (4 críticos, 3 importantes, 3 menores) que afectan performance, correctness y UX. Ninguno es un blocker — el sistema es funcional — pero son oportunidades de mejora de bajo esfuerzo.
+
+**El cuello de botella REAL** (no es un timeout — es un cuello serializado):
 
 | Categoría | Hallazgo | Impacto |
 |---|---|---|
-| 🔴 Crítico | In-process mode sin timeout — queries pueden quedar colgados 15+ min | UX, server resources |
-| 🔴 Crítico | `research_brain_evidence.bioprospectingFacts` siempre vacío en evidence pack | Features no se usan |
-| 🔴 Crítico | `USE_JOB_QUEUE` en .env no surte efecto sin restart del API | Operations |
-| 🟡 Importante | Literature agent tarda ~93s por task (5 tasks × 93s = 7.7 min de "gap invisible") | Performance, UX |
-| 🟡 Importante | 1 candidato en `plan` ignora query original — genera 5 sub-queries para "curcumin" en lugar de mantener foco | Quality |
-| 🟡 Importante | `bioprospectingFacts` no se filtra por query relevance — devuelve TODOS los 22 canonicals | Correctness |
-| 🟢 Menor | OpenScholar y Edison SIEMPRE fallan (no auth) — solo Knowledge agent local funciona | Operacional |
-| 🟢 Menor | `research_evidence_chunks` join en evidence pack filtra por `evidence_chunks`, no por `chunks` — miss en algunos casos | Quality |
+| 🔴 Crítico | **9m 38s "invisible" en iteración 2** entre decision de continue y ejecución de tasks | Performance, UX |
+| 🔴 Crítico | **1m 13s en iter 1 + 1m 16s en iter 2 = 2m 29s en LLM calls** que NO se loggean | Observability |
+| 🔴 Crítico | In-process mode sin timeout — queries pueden quedar colgados 15+ min (HALLAZGO #1) | UX, server resources |
+| 🔴 Crítico | `research_brain_evidence.bioprospectingFacts` siempre vacío en evidence pack (HALLAZGO #2) | Features no se usan |
+| 🟡 Importante | Literature agent tarda ~93s por task (HALLAZGO #4) | Performance |
+| 🟡 Importante | Planning agent genera 5 sub-queries para "curcumin" cuando 1-2 bastarían (HALLAZGO #5) | Quality |
+| 🟡 Importante | `bioprospectingFacts` no se filtra por query relevance (HALLAZGO #6) | Correctness |
+| 🟢 Menor | OpenScholar y Edison SIEMPRE fallan (no auth) — log error en vez de info (HALLAZGO #7) | Operacional |
+| 🟢 Menor | `evidence_chunks` join en evidence pack miss en algunos casos (HALLAZGO #8) | Quality |
+| 🟢 Menor | `bioprospecting_fact_phrase_failed × 9` por iteración (HALLAZGO #10) | Noise |
+
+**Antes de meter timeout, hay que perfilar los 9m 38s** — es el agujero más grande y NO es un LLM call (las tasks completas en 7s después). El cuello está en el código entre `auto_continuing_to_next_iteration` y `🚀 Starting search pipeline`.
 
 ---
 
@@ -26,33 +32,67 @@
 **Completado**: 2026-06-17 17:55:02 UTC
 **Total**: **20m 50s** wall-time
 
+### Iteración 1 (17:34:13 → 17:38:39)
+
 | Etapa | Timestamp | Duración | Notas |
 |---|---|---|---|
-| `deep_research_state_initialized` | 17:34:11 | <1s | Auth + state creation |
-| `deep_research_using_in_process_mode` | 17:34:12 | — | **In-process mode** (no enqueue) |
-| `deep_research_started` | 17:34:12 | — | |
-| `research_brain_search_completed` (initial) | 17:34:14 | 2s | |
-| **GAP invisible para el usuario** | 17:34:14 → 17:41:50 | **7m 36s** | 5 LITERATURE tasks ejecutándose sin progress visible |
-| `reply_agent_completed` | 17:41:50 | — | First reply (vacío) |
-| `literature_agent_started` × 5 | 17:41:56 | — | Re-ejecuta 5 tasks (iteration loop) |
-| `knowledge_search_completed` × 5 | 17:41:56–17:41:58 | 608-1370ms c/u | Knowledge agent local |
-| `task_completed` × 5 | 17:42:02–17:42:04 | <1s c/u | |
-| `hypothesis_agent_started` | 17:42:04 | — | |
-| `hypothesis_agent_completed` | 17:43:46 | **1m 42s** | Hypothesis: 4670 chars |
-| `reflection_agent_started` | 17:43:48 | — | |
-| `reflection_completed` | 17:44:57 | **1m 9s** | |
-| `discovery_extraction_completed` | 17:55:01 | — | |
-| `discovery_persist_completed` | 17:55:02 | — | |
-| `discovery_agent_completed` | 17:55:02 | — | |
-| `deep_research_execution_failed` | 17:55:02 | — | **Error al final**, pero hypothesis se generó |
+| `starting_iteration` (1) | 17:34:13 | — | |
+| `research_brain_search_completed` (initial) | 17:34:14 | 1s | Knowledge search rápido |
+| `current_suggested_next_steps` | 17:34:50 | **36s gap** | iteration 1 ended, auto-iter |
+| `initial_plan_generated` | 17:35:14 | **24s gap** | Planning LLM call |
+| `new_tasks_added_to_plan` | 17:36:08 | **54s gap** | 5 LITERATURE tasks ejecutándose |
+| `literature_agent_started × 2` (OpenScholar+Edison) | 17:36:09 | — | Edison fail instant (no key) |
+| `knowledge_search_completed` (5 tasks en paralelo) | 17:36:11 | 2.5s c/u | Knowledge agent local |
+| `task_completed` | 17:36:12 | <1s c/u | |
+| `hypothesis_agent_started` | 17:36:13 | — | |
+| `hypothesis_generated` | 17:37:40 | **1m 27s** | LLM call (Qwen) |
+| `skipping_discovery_insufficient_messages` | 17:37:41 | — | Primera hypothesis: "insuficiente" |
+| `reflection_agent_started` | 17:37:41 | — | |
+| `reflection_completed` | 17:38:39 | **58s** | LLM call |
+| `world_state_updated` | 17:39:24 | — | |
+| `plan_generated` (next iter) | 17:39:58 | **34s** | Planning para iter 2 |
+| `next_iteration_suggestions_saved` | 17:40:37 | **39s** | Decide continue |
+| `continue_research_agent_started` | 17:40:37 | — | Auto-continue (first_iteration_auto_continue) |
+
+### Iteración 2 (17:40:37 → 17:55:02)
+
+| Etapa | Timestamp | Duración | Notas |
+|---|---|---|---|
+| `reply_agent_started` | 17:40:37 | — | Reply mode report |
+| `reply_generated` | 17:41:50 | **1m 13s** | Reply (vacío) |
+| `auto_continuing_to_next_iteration` | 17:41:53 | — | |
+| `starting_iteration` (2) | 17:41:54 | — | |
+| `research_brain_search_completed` (iter 2) | 17:41:56 | 1s | |
+| **`🚀 Starting search pipeline` (5 tasks)** | 17:51:38 | **9m 38s gap** | LITERATURE tasks ejecutándose |
+| `knowledge_search_completed` (× 5) | 17:51:39-40 | <1s c/u | |
+| `task_completed` (× 5) | 17:51:45-46 | <1s c/u | |
+| `hypothesis_agent_started` | 17:51:46 | — | |
+| `hypothesis_generated` | 17:53:02 | **1m 16s** | |
+| `running_reflection_and_discovery_agents` | 17:53:03 | — | Paralelo |
+| `reflection_completed` | 17:54:30 | **1m 27s** | |
+| `discovery_extraction_completed` | 17:55:01 | **31s** | |
+| `discovery_agent_completed` | 17:55:02 | <1s | |
+| `deep_research_execution_failed` | 17:55:02 | — | Error al final |
 
 ### Observaciones del timing
 
-- **El usuario solo vio "5 Literature Search steps × 3-6s cada uno = 23s"** en el Activity Log. Esto es **engañoso**: el total real fue 20m 50s. La diferencia (20m 27s) es invisible.
-- **El gap de 7m 36s entre `research_brain_search_completed` (17:34:14) y `reply_agent_completed` (17:41:50)** son los 5 LITERATURE tasks ejecutándose secuencialmente. Cada task es: knowledge_search (~1s) + LLM call de literature_agent (~93s promedio).
-- **Hipótesis generation: 1m 42s** — razonable para texto de 4670 chars.
-- **Reflection: 1m 9s** — razonable.
-- **El "deep_research_execution_failed" al final** es probablemente un cleanup error post-completion, no un failure real (la hypothesis se generó).
+**Gaps totales = 19m 24s de los 20m 50s** (93% del tiempo son operaciones no loggeadas):
+
+| Gap | Duración | Qué pasa |
+|---|---|---|
+| 17:34:14 → 17:34:50 | 36s | Suggested next steps LLM call |
+| 17:34:50 → 17:35:14 | 24s | Initial plan LLM call |
+| 17:35:14 → 17:36:08 | 54s | 5 LITERATURE tasks ejecutándose |
+| 17:37:41 → 17:38:39 | 58s | Reflection LLM call |
+| 17:39:24 → 17:39:58 | 34s | Next-iter plan LLM call |
+| 17:39:58 → 17:40:37 | 39s | Next-iter suggestions LLM call |
+| **17:41:56 → 17:51:38** | **9m 38s** | **5 LITERATURE tasks ejecutándose** (iter 2) |
+| 17:51:46 → 17:53:02 | 1m 16s | Hypothesis LLM call |
+| 17:53:03 → 17:54:30 | 1m 27s | Reflection LLM call |
+
+**El usuario solo vio "5 Literature Search steps × 3-6s cada uno = 23s"** en el Activity Log. Esto es **engañoso**: el total real fue 20m 50s. La diferencia (20m 27s) es invisible.
+
+**El gap de 9m 38s en iteración 2 es el más sospechoso**: el system ejecutó 5 LITERATURE tasks con Promise.all, cada una haciendo vector_search (~1s) + knowledge_search (~2.5s) → debería tardar ~3s, no 9m 38s.
 
 ---
 
@@ -298,23 +338,89 @@ Log: "deep_research_using_in_process_mode"
 
 ---
 
+### 🔴 HALLAZGO #9 — 9m 38s "invisible" en iteración 2 (CRÍTICO)
+
+**Síntoma**: La iteración 2 (17:41:56 → 17:51:38) tiene un gap de **9m 38s** entre `research_brain_search_completed` y `🚀 Starting search pipeline`. Pero los 5 LITERATURE tasks que corren después completan en 7 segundos.
+
+**Evidencia**:
+```
+17:41:56 research_brain_search_completed (iter 2)
+... 9m 38s de silencio en los logs ...
+17:51:38 🚀 Starting search pipeline (5 tasks)
+17:51:39 vector_search × 5
+17:51:40 knowledge_search_completed (× 5)
+17:51:46 task_completed (× 5)  ← las 5 tasks completaron en 7s
+```
+
+**Causa raíz probable**: El código tiene un loop que espera antes de ejecutar las LITERATURE tasks. Mirando `start.ts:1386-1417`:
+- Línea 1386: `tasksToExecute = (conversationState.values.plan || []).filter(...)` — filtra tasks del plan actual
+- Línea 1417: `const taskPromises = tasksToExecute.map(async (task) => {...})` — crea promesas
+
+Pero las tasks NO se ejecutan hasta llegar a `Promise.all(taskPromises)` en línea 1697. Antes de eso, hay otro código que puede tomar tiempo (validación, persist state, refresh activity, etc).
+
+**Causa más probable**: El código espera a que `auto_continuing_to_next_iteration` se complete, lo cual puede implicar:
+1. Update del conversationState en DB
+2. Wait de la mutation anterior
+3. Then ejecuta las tasks
+
+Esto es **un cuello serializado artificial** entre la decisión "continuar" y la ejecución de las tareas. Si esto está mal implementado, cada iteración tiene un gap de 5-10 min sin razón aparente.
+
+**Fix propuesto**:
+1. **Medir exactamente qué pasa en esos 9m 38s**: agregar `console.time()` o wrapping con timestamps en el código entre `auto_continuing_to_next_iteration` y `🚀 Starting search pipeline`.
+2. **Si es overhead de DB**: las queries de update pueden tomar mucho si hay race conditions. Agregar `await` solo donde sea necesario.
+3. **Si es retry de algo**: el log `bioprospecting_fact_phrase_failed × 9` antes del gap sugiere que algo está reintentando 9 veces (ver HALLAZGO #10).
+
+**Esfuerzo**: M (2-4 horas) para instrumentar + fix
+**Archivos afectados**: `src/routes/deep-research/start.ts` (start.ts:1697 region)
+
+---
+
+### 🟢 HALLAZGO #10 — `bioprospecting_fact_phrase_failed × 9` (MENOR)
+
+**Síntoma**: En cada iteración, el log emite 9 warnings `bioprospecting_fact_phrase_failed`.
+
+**Evidencia**:
+```
+17:41:55 bioprospecting_fact_phrase_failed (× 4)
+17:41:55 bioprospecting_fact_phrase_failed (× 5)
+17:41:55 bioprospecting_fact_phrase_failed (× 9 — 5 tasks × 2 attempts)
+```
+
+**Causa raíz probable**: El sistema intenta extraer bioprospecting facts de los chunks, falla, e intenta de nuevo. El número 9 ≈ 5 tasks × 2 attempts (knowledge search + literature attempt).
+
+**Fix**: ver por qué falla, o silenciar el warning si es expected behavior.
+
+**Esfuerzo**: XS (15 min)
+**Archivos afectados**: probablemente en `src/services/researchBrain/` o `src/agents/bioprospecting/`
+
+---
+
 ## Plan de Mejoras Priorizado
+
+### Sprint 0 (1 día) — Profiling + medición
+
+**CRÍTICO**: Antes de cualquier fix, instrumentar el código entre `auto_continuing_to_next_iteration` y `🚀 Starting search pipeline` para saber qué pasa en esos 9m 38s.
+
+1. **HALLAZGO #9**: agregar `console.time()` + timestamps a `start.ts:1386-1697` (la región que ejecuta tasks)
+2. **HALLAZGO #10**: silenciar o arreglar el `bioprospecting_fact_phrase_failed × 9`
+
+**Output esperado**: trace con timing exacto de cada await. Una vez sabemos qué es, decidimos el fix.
 
 ### Sprint 1 (1-2 días) — UX + correctness
 
-1. **HALLAZGO #1**: timeout por iteración + top-level timeout (S)
-2. **HALLAZGO #3**: documentar que .env requiere restart (Trivial)
-3. **HALLAZGO #7**: loggear disabled cuando Edison/OpenScholar no están (S)
+3. **HALLAZGO #1**: timeout por iteración + top-level timeout (S) — **DESPUÉS de perfilar**
+4. **HALLAZGO #3**: documentar que .env requiere restart (Trivial)
+5. **HALLAZGO #7**: loggear disabled cuando Edison/OpenScholar no están (S)
 
 ### Sprint 2 (2-3 días) — Performance + features
 
-4. **HALLAZGO #4**: parallelizar literature_agent (M)
-5. **HALLAZGO #5**: prompt del planning agent más enfocado (S-M)
-6. **HALLAZGO #2+#6**: filtrar bioprospecting_facts por relevance (M)
+6. **HALLAZGO #4**: parallelizar literature_agent (M) — **DESPUÉS de saber qué pasa en el gap**
+7. **HALLAZGO #5**: prompt del planning agent más enfocado (S-M)
+8. **HALLAZGO #2+#6**: filtrar bioprospecting_facts por relevance (M)
 
 ### Sprint 3 (1-2 días) — Quality
 
-7. **HALLAZGO #8**: revisar join de evidence_chunks en sources (M)
+9. **HALLAZGO #8**: revisar join de evidence_chunks en sources (M)
 
 ---
 

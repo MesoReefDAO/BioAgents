@@ -243,10 +243,20 @@ BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 if [[ "$NO_REBUILD" == "1" || "${SKIP_REBUILD:-0}" == "1" ]]; then
   warn "Skipping docker rebuild (--no-rebuild)"
 else
+  # CACHE_BUST=1 forces a no-cache rebuild so the client bundle picks up
+  # the new package.json version. Without this, Docker's layer cache
+  # may reuse the previous client/dist and the Footer would show a
+  # stale "version mismatch" warning.
+  CACHE_FLAG=""
+  if [[ "${CACHE_BUST:-0}" == "1" ]]; then
+    CACHE_FLAG="--no-cache"
+    log "CACHE_BUST=1 → rebuilding without docker cache"
+  fi
+
   log "Rebuilding api (GIT_SHA=$GIT_SHA, BUILD_DATE=$BUILD_DATE)..."
   run docker compose down bioagents
   run env GIT_SHA="$GIT_SHA" BUILD_DATE="$BUILD_DATE" \
-    docker compose build \
+    docker compose build $CACHE_FLAG \
       --build-arg GIT_SHA="$GIT_SHA" \
       --build-arg BUILD_DATE="$BUILD_DATE" \
       bioagents
@@ -255,7 +265,7 @@ else
   log "Rebuilding worker..."
   run docker compose -f docker-compose.yml -f docker-compose.worker.yml down worker
   run env GIT_SHA="$GIT_SHA" BUILD_DATE="$BUILD_DATE" \
-    docker compose -f docker-compose.yml -f docker-compose.worker.yml build \
+    docker compose -f docker-compose.yml -f docker-compose.worker.yml build $CACHE_FLAG \
       --build-arg GIT_SHA="$GIT_SHA" \
       --build-arg BUILD_DATE="$BUILD_DATE" \
       worker

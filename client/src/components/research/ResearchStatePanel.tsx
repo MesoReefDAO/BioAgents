@@ -1,6 +1,10 @@
 import { useState, useEffect } from "preact/hooks";
 import { Icon } from "../icons";
 import { ArtifactViewer } from "./ArtifactViewer";
+import {
+  EvidenceBySourcePanel,
+  type LiteratureSource,
+} from "./EvidenceBySourcePanel";
 
 interface Dataset {
   id: string;
@@ -30,6 +34,9 @@ interface PlanStep {
   type: string;
   objective: string;
   output?: string;
+  /** Per-source provenance for LITERATURE tasks (commit 516440e). When
+   *  present we render EvidenceBySourcePanel instead of the flat output. */
+  sources?: LiteratureSource[];
   datasets?: Dataset[];
   start?: string;
   end?: string;
@@ -544,8 +551,17 @@ export function ResearchStatePanel({
                             </div>
                           )}
 
-                          {/* Step output with expand/collapse */}
-                          {step.output && (
+                          {/* Per-source evidence panel (preferred for LITERATURE tasks) */}
+                          {step.sources && step.sources.length > 0 && (
+                            <EvidenceBySourcePanel
+                              sources={step.sources}
+                              defaultExpanded={false}
+                            />
+                          )}
+
+                          {/* Step output with expand/collapse (fallback for legacy
+                              tasks without sources[] or for ANALYSIS tasks) */}
+                          {step.output && (!step.sources || step.sources.length === 0) && (
                             <div className="research-step-output">
                               <pre className="research-step-output-content">
                                 {isOutputExpanded

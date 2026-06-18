@@ -1,19 +1,18 @@
 /**
  * Unit tests for `src/services/researchBrain/reviewService.ts`.
  *
- * Coverage (12 cases, matching the tasks.md spec):
+ * Coverage (11 cases, matching the tasks.md spec):
  *   1. `listContradictionsGlobal` — happy path
  *   2. `listContradictionsGlobal` — status filter (eq)
- *   3. `listContradictionsGlobal` — sourceId filter (eq)
- *   4. `listContradictionsGlobal` — limit clamp at 200
- *   5. `getContradictionStats` — pending clamp (resolved+dismissed > found)
- *   6. `getContradictionStats` — happy path (RPC + edges combined)
- *   7. `listRecentMergeEvents` — happy path
- *   8. `listRecentMergeEvents` — since='all' omits time filter
- *   9. `listRecentMergeEvents` — limit clamp at 200
- *  10. `unmergeFact` — happy path (edge + audit returned)
- *  11. `unmergeFact` — NoActiveEdgeError on double-unmerge
- *  12. `unmergeFact` — AmbiguousEdgeError on multi-edge
+ *   3. `listContradictionsGlobal` — limit clamp at 200
+ *   4. `getContradictionStats` — pending clamp (resolved+dismissed > found)
+ *   5. `getContradictionStats` — happy path (RPC + edges combined)
+ *   6. `listRecentMergeEvents` — happy path
+ *   7. `listRecentMergeEvents` — since='all' omits time filter
+ *   8. `listRecentMergeEvents` — limit clamp at 200
+ *   9. `unmergeFact` — happy path (edge + audit returned)
+ *  10. `unmergeFact` — NoActiveEdgeError on double-unmerge
+ *  11. `unmergeFact` — AmbiguousEdgeError on multi-edge
  *
  * The chainable mock follows the same `scriptedMock` pattern as
  * `dedup.test.ts`. RPC is mocked via the `from("get_contradiction_stats")`
@@ -157,18 +156,17 @@ const USER_ID = "admin-1";
 function makeContradiction(overrides: Record<string, unknown> = {}) {
   return {
     id: "00000000-0000-0000-0000-0000000000a1",
-    source_id: SOURCE_ID,
-    source_fact_id: "00000000-0000-0000-0000-0000000000f2",
-    conflicting_fact_id: "00000000-0000-0000-0000-0000000000f3",
-    contradiction_type: "measurement_direction",
-    evidence_pack: {},
-    rule_version: "1.0",
-    llm_version: "1.0",
-    resolution_status: "unresolved",
+    fact_a_id: "00000000-0000-0000-0000-0000000000f2",
+    fact_b_id: "00000000-0000-0000-0000-0000000000f3",
+    conflict_type: "compound_mismatch",
+    severity: "medium",
+    explanation: null,
+    status: "open",
     resolved_by: null,
     resolved_at: null,
-    created_at: "2026-06-15T00:00:00Z",
-    updated_at: "2026-06-15T00:00:00Z",
+    resolution_note: null,
+    detected_at: "2026-06-15T00:00:00Z",
+    metadata: {},
     ...overrides,
   };
 }
@@ -219,32 +217,14 @@ describe("reviewService — listContradictionsGlobal", () => {
       offset: 0,
     });
     const eqCalls = calls.filter((c) => c.method === "eq");
-    // Both the count and the page query apply the status filter.
+    // Both the count and the page query apply the status filter. The
+    // DB column is `status`; for "resolved" the value passes through
+    // directly (no mapping). For "unresolved" the function maps to
+    // DB "open" before issuing the query.
     const statusEq = eqCalls.filter(
-      (c) => c.args[0] === "resolution_status" && c.args[1] === "resolved",
+      (c) => c.args[0] === "status" && c.args[1] === "resolved",
     );
     expect(statusEq.length).toBeGreaterThanOrEqual(2);
-  });
-
-  it("filters by sourceId when provided", async () => {
-    client = scriptedMock(
-      [
-        { kind: "many", data: [], error: null },
-        { kind: "many", data: [makeContradiction()], error: null },
-      ],
-      calls,
-    );
-    setMockServiceClient(() => client);
-
-    await listContradictionsGlobal({
-      sourceId: SOURCE_ID,
-      limit: 50,
-      offset: 0,
-    });
-    const eqCalls = calls.filter(
-      (c) => c.method === "eq" && c.args[0] === "source_id" && c.args[1] === SOURCE_ID,
-    );
-    expect(eqCalls.length).toBeGreaterThanOrEqual(2);
   });
 
   it("clamps limit to 200 when a higher value is requested", async () => {

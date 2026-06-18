@@ -8,13 +8,13 @@ import {
   extractBioprospectingFactsForSource,
   extractClaimsForSource,
   getBioprospectingFact,
+  getBioprospectingFactsForSource,
   getCanonicalById,
   getClaim,
-  getContradictionsForSource,
+  getContradictionStats,
   getSource,
   getSourceClaims,
   getSourceEvidenceChunk,
-  getContradictionStats,
   listResearchTaxa,
   listSources,
   listContradictionsGlobal,
@@ -23,6 +23,7 @@ import {
   promoteFactToPending,
   researchBrainSearch,
   resolveBioprospectingContradiction,
+  searchBioprospectingContradictions,
   searchBioprospectingFacts,
   searchCompoundsByName,
   unmergeFact,
@@ -961,9 +962,13 @@ export const researchBrainRoute = new Elysia({ prefix: "/api/research-brain" })
         return { error: "Invalid status. Use: unresolved|resolved|dismissed|all" };
       }
       try {
-        const contradictions = await getContradictionsForSource({
-          sourceId: params.sourceId,
-          status: status as "unresolved" | "resolved" | "dismissed" | "all",
+        const includeResolved =
+          status === "all" || status === "resolved" || status === "dismissed";
+        const facts = await getBioprospectingFactsForSource(params.sourceId);
+        const factIds = facts.map((f: any) => f.id);
+        const contradictions = await searchBioprospectingContradictions({
+          factIds,
+          includeResolved,
         });
         return { contradictions };
       } catch (error: any) {
@@ -1798,7 +1803,6 @@ export const researchBrainRoute = new Elysia({ prefix: "/api/research-brain" })
             | "resolved"
             | "dismissed"
             | undefined,
-          sourceId: parsed.sourceId,
           limit,
           offset,
         });
@@ -1810,7 +1814,7 @@ export const researchBrainRoute = new Elysia({ prefix: "/api/research-brain" })
         };
       } catch (error: any) {
         logger.error(
-          { err: error, status, sourceId: parsed.sourceId, limit, offset },
+          { err: error, status, limit, offset },
           "admin_contradictions_list_failed",
         );
         set.status = 500;

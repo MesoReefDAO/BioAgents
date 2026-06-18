@@ -7,29 +7,23 @@ import type {
 const supabase = getServiceClient();
 
 export type ContradictionInsert = {
-  sourceId: string;
-  sourceFactId: string;
-  conflictingFactId: string;
-  contradictionType: string;
-  evidencePack: {
-    source_a: { fact_id: string; source: string; value: string; provenance: string };
-    source_b: { fact_id: string; source: string; value: string; provenance: string };
-    conflict_summary: string;
-  };
-  ruleVersion?: string | null;
-  llmVersion?: string | null;
+  factAId: string;
+  factBId: string;
+  conflictType: string;
+  severity?: string;
+  explanation?: string | null;
+  metadata?: Record<string, unknown>;
 };
 
 export type ContradictionSearchResult = ResearchBioprospectingContradiction & {
-  source?: { id: string; title: string; doi: string | null };
-  source_fact?: BioprospectingFact;
-  conflicting_fact?: BioprospectingFact;
+  fact_a?: BioprospectingFact & { source?: { id: string; title: string; doi: string | null } };
+  fact_b?: BioprospectingFact & { source?: { id: string; title: string; doi: string | null } };
 };
 
 /**
  * Upsert a single bioprospecting contradiction.
- * Skips insert if an identical contradiction already exists (same source_fact_id,
- * conflicting_fact_id, and contradiction_type).
+ * Skips insert if an identical contradiction already exists (same fact_a_id,
+ * fact_b_id, and conflict_type).
  */
 export async function upsertBioprospectingContradiction(
   params: ContradictionInsert,
@@ -37,9 +31,9 @@ export async function upsertBioprospectingContradiction(
   const { data: existing } = await supabase
     .from("research_bioprospecting_contradictions")
     .select("id")
-    .eq("source_fact_id", params.sourceFactId)
-    .eq("conflicting_fact_id", params.conflictingFactId)
-    .eq("contradiction_type", params.contradictionType)
+    .eq("fact_a_id", params.factAId)
+    .eq("fact_b_id", params.factBId)
+    .eq("conflict_type", params.conflictType)
     .maybeSingle();
 
   if (existing) {
@@ -49,14 +43,13 @@ export async function upsertBioprospectingContradiction(
   const { data, error } = await supabase
     .from("research_bioprospecting_contradictions")
     .insert({
-      source_id: params.sourceId,
-      source_fact_id: params.sourceFactId,
-      conflicting_fact_id: params.conflictingFactId,
-      contradiction_type: params.contradictionType,
-      evidence_pack: params.evidencePack,
-      rule_version: params.ruleVersion ?? null,
-      llm_version: params.llmVersion ?? null,
-      resolution_status: "unresolved",
+      fact_a_id: params.factAId,
+      fact_b_id: params.factBId,
+      conflict_type: params.conflictType,
+      severity: params.severity ?? "medium",
+      explanation: params.explanation ?? null,
+      metadata: params.metadata ?? {},
+      status: "open",
     })
     .select("*")
     .single();
@@ -66,9 +59,9 @@ export async function upsertBioprospectingContradiction(
 }
 
 /**
- * Search for contradictions where either the source_fact_id or conflicting_fact_id
+ * Search for contradictions where either the fact_a_id or fact_b_id
  * appears in the provided factIds list.
- * Returns only unresolved contradictions by default.
+ * Returns only open contradictions by default.
  */
 export async function searchBioprospectingContradictions(params: {
   factIds: string[];
@@ -80,14 +73,17 @@ export async function searchBioprospectingContradictions(params: {
   let query = supabase
     .from("research_bioprospecting_contradictions")
     .select(
-      "*, source:research_sources(*), source_fact:research_bioprospecting_facts(*), conflicting_fact:research_bioprospecting_facts(*)",
+      // Nested FK joins: fact_a_id and fact_b_id both reference
+      // research_bioprospecting_facts, which in turn references
+      // research_sources via its own source_id FK.
+      "*, fact_a:research_bioprospecting_facts!fact_a_id(*, source:research_sources(*)), fact_b:research_bioprospecting_facts!fact_b_id(*, source:research_sources(*))",
     )
     .or(
-      `source_fact_id.in.(${factIds}),conflicting_fact_id.in.(${factIds})`,
+      `fact_a_id.in.(${factIds}),fact_b_id.in.(${factIds})`,
     );
 
   if (!params.includeResolved) {
-    query = query.eq("resolution_status", "unresolved");
+    query = query.eq("status", "open");
   }
 
   const { data, error } = await query;
@@ -96,19 +92,21 @@ export async function searchBioprospectingContradictions(params: {
 }
 
 /**
- * Resolve or dismiss a contradiction by updating its resolution status.
+ * Resolve or dismiss a contradiction by updating its status.
  */
 export async function resolveBioprospectingContradiction(params: {
   contradictionId: string;
   resolutionStatus: "resolved" | "dismissed";
   resolvedBy?: string;
+  resolutionNote?: string;
 }): Promise<ResearchBioprospectingContradiction> {
   const { data, error } = await supabase
     .from("research_bioprospecting_contradictions")
     .update({
-      resolution_status: params.resolutionStatus,
+      status: params.resolutionStatus,
       resolved_by: params.resolvedBy || null,
       resolved_at: new Date().toISOString(),
+      resolution_note: params.resolutionNote || null,
     })
     .eq("id", params.contradictionId)
     .select("*")
@@ -116,27 +114,4 @@ export async function resolveBioprospectingContradiction(params: {
 
   if (error) throw error;
   return data as ResearchBioprospectingContradiction;
-}
-
-/**
- * Get all contradictions for a given source, optionally filtered by status.
- */
-export async function getContradictionsForSource(params: {
-  sourceId: string;
-  status?: "unresolved" | "resolved" | "dismissed" | "all";
-}): Promise<ResearchBioprospectingContradiction[]> {
-  let query = supabase
-    .from("research_bioprospecting_contradictions")
-    .select(
-      "*, source:research_sources(*), source_fact:research_bioprospecting_facts(*), conflicting_fact:research_bioprospecting_facts(*)",
-    )
-    .eq("source_id", params.sourceId);
-
-  if (params.status && params.status !== "all") {
-    query = query.eq("resolution_status", params.status);
-  }
-
-  const { data, error } = await query;
-  if (error) throw error;
-  return (data || []) as ResearchBioprospectingContradiction[];
 }

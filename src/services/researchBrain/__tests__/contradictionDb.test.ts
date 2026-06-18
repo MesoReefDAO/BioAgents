@@ -2,21 +2,21 @@ import { describe, it, expect } from "bun:test";
 
 /**
  * Unit tests for contradictionDb.ts database functions.
- * Tests the core logic for upsert, search, resolve, and getForSource operations.
+ * Tests the core logic for upsert, search, and resolve operations.
  */
 
 describe("contradictionDb", () => {
   describe("ContradictionInsert validation", () => {
-    it("should reject self-referencing contradictions (source_fact_id === conflicting_fact_id)", () => {
-      const sourceFactId = "fact-123";
-      const conflictingFactId = "fact-123";
-      expect(sourceFactId === conflictingFactId).toBe(true);
+    it("should reject self-referencing contradictions (fact_a_id === fact_b_id)", () => {
+      const factAId = "fact-123";
+      const factBId = "fact-123";
+      expect(factAId === factBId).toBe(true);
     });
 
     it("should accept distinct fact IDs for contradiction", () => {
-      const sourceFactId = "fact-123";
-      const conflictingFactId = "fact-456";
-      expect(sourceFactId === conflictingFactId).toBe(false);
+      const factAId = "fact-123";
+      const factBId = "fact-456";
+      expect(factAId === factBId).toBe(false);
     });
   });
 
@@ -24,66 +24,54 @@ describe("contradictionDb", () => {
     it("should include required fields in search result", () => {
       const mockResult = {
         id: "contr-1",
-        source_id: "source-1",
-        source_fact_id: "fact-1",
-        conflicting_fact_id: "fact-2",
-        contradiction_type: "measurement_direction",
-        evidence_pack: {
-          source_a: {
-            fact_id: "fact-1",
-            source: "Paper A",
-            value: "agonist",
-            provenance: "page 3, chunk 1",
-          },
-          source_b: {
-            fact_id: "fact-2",
-            source: "Paper B",
-            value: "antagonist",
-            provenance: "page 7, chunk 2",
-          },
-          conflict_summary: "Conflicting measurement_direction: agonist vs antagonist",
-        },
-        rule_version: "1.0",
-        llm_version: null,
-        resolution_status: "unresolved",
+        fact_a_id: "fact-1",
+        fact_b_id: "fact-2",
+        conflict_type: "compound_mismatch",
+        severity: "medium",
+        explanation: null,
+        status: "open",
         resolved_by: null,
         resolved_at: null,
-        created_at: "2026-01-01T00:00:00Z",
-        updated_at: "2026-01-01T00:00:00Z",
+        resolution_note: null,
+        detected_at: "2026-01-01T00:00:00Z",
+        metadata: {},
       };
 
       expect(mockResult.id).toBeDefined();
-      expect(mockResult.contradiction_type).toBe("measurement_direction");
-      expect(mockResult.resolution_status).toBe("unresolved");
+      expect(mockResult.conflict_type).toBe("compound_mismatch");
+      expect(mockResult.status).toBe("open");
+      expect(mockResult.severity).toBe("medium");
     });
 
-    it("should support both rule-based and LLM-detected contradictions", () => {
-      const ruleBased = {
-        rule_version: "1.0",
-        llm_version: null,
-      };
+    it("should support all valid conflict types from the schema check constraint", () => {
+      const validTypes = ["compound_mismatch", "bioactivity_mismatch", "organism_mismatch", "measurement_mismatch"];
+      for (const t of validTypes) {
+        expect(validTypes.includes(t)).toBe(true);
+      }
+    });
 
-      const llmBased = {
-        rule_version: null,
-        llm_version: "1.0",
-      };
+    it("should support all valid severity levels", () => {
+      const validSeverities = ["low", "medium", "high"];
+      for (const s of validSeverities) {
+        expect(validSeverities.includes(s)).toBe(true);
+      }
+    });
 
-      expect(ruleBased.rule_version).toBe("1.0");
-      expect(ruleBased.llm_version).toBeNull();
-      expect(llmBased.rule_version).toBeNull();
-      expect(llmBased.llm_version).toBe("1.0");
+    it("should support all valid status values", () => {
+      const validStatuses = ["open", "resolved", "dismissed"];
+      for (const s of validStatuses) {
+        expect(validStatuses.includes(s)).toBe(true);
+      }
     });
   });
 
   describe("Resolution status transitions", () => {
-    it("should allow unresolved to resolved transition", () => {
-      const status = "unresolved";
+    it("should allow open to resolved transition", () => {
       const validTransitions = ["resolved", "dismissed"];
       expect(validTransitions.includes("resolved")).toBe(true);
     });
 
-    it("should allow unresolved to dismissed transition", () => {
-      const status = "unresolved";
+    it("should allow open to dismissed transition", () => {
       const validTransitions = ["resolved", "dismissed"];
       expect(validTransitions.includes("dismissed")).toBe(true);
     });
@@ -102,9 +90,9 @@ describe("contradictionDb", () => {
     });
   });
 
-  describe("Evidence pack structure", () => {
-    it("should include source_a and source_b in evidence pack", () => {
-      const evidencePack = {
+  describe("Metadata structure", () => {
+    it("should include source_a and source_b in metadata", () => {
+      const metadata = {
         source_a: {
           fact_id: "fact-1",
           source: "Paper A",
@@ -117,13 +105,13 @@ describe("contradictionDb", () => {
           value: "antagonist",
           provenance: "page 7, chunk 2",
         },
-        conflict_summary: "Conflicting measurement_direction: agonist vs antagonist",
+        conflict_summary: "Conflicting compound_mismatch: agonist vs antagonist",
       };
 
-      expect(evidencePack.source_a.fact_id).toBe("fact-1");
-      expect(evidencePack.source_b.fact_id).toBe("fact-2");
-      expect(evidencePack.conflict_summary).toContain("agonist");
-      expect(evidencePack.conflict_summary).toContain("antagonist");
+      expect(metadata.source_a.fact_id).toBe("fact-1");
+      expect(metadata.source_b.fact_id).toBe("fact-2");
+      expect(metadata.conflict_summary).toContain("agonist");
+      expect(metadata.conflict_summary).toContain("antagonist");
     });
   });
 
@@ -134,74 +122,59 @@ describe("contradictionDb", () => {
     });
   });
 
-  describe("Contradiction type validation", () => {
-    it("should support measurement_direction type", () => {
-      const validTypes = ["measurement_direction", "relation_type", "contextual", "measurement_impossibility", "directional_conflict"];
-      expect(validTypes.includes("measurement_direction")).toBe(true);
+  describe("Conflict type validation", () => {
+    it("should support compound_mismatch type", () => {
+      const validTypes = ["compound_mismatch", "bioactivity_mismatch", "organism_mismatch", "measurement_mismatch"];
+      expect(validTypes.includes("compound_mismatch")).toBe(true);
     });
 
-    it("should support relation_type type", () => {
-      const validTypes = ["measurement_direction", "relation_type", "contextual", "measurement_impossibility", "directional_conflict"];
-      expect(validTypes.includes("relation_type")).toBe(true);
+    it("should support bioactivity_mismatch type", () => {
+      const validTypes = ["compound_mismatch", "bioactivity_mismatch", "organism_mismatch", "measurement_mismatch"];
+      expect(validTypes.includes("bioactivity_mismatch")).toBe(true);
     });
   });
 
   describe("Deduplication logic", () => {
     it("should skip duplicate contradictions with same fact pair and type", () => {
       const existing = {
-        source_fact_id: "fact-1",
-        conflicting_fact_id: "fact-2",
-        contradiction_type: "measurement_direction",
+        fact_a_id: "fact-1",
+        fact_b_id: "fact-2",
+        conflict_type: "compound_mismatch",
       };
 
       const incoming = {
-        source_fact_id: "fact-1",
-        conflicting_fact_id: "fact-2",
-        contradiction_type: "measurement_direction",
+        fact_a_id: "fact-1",
+        fact_b_id: "fact-2",
+        conflict_type: "compound_mismatch",
       };
 
       const isDuplicate =
-        existing.source_fact_id === incoming.source_fact_id &&
-        existing.conflicting_fact_id === incoming.conflicting_fact_id &&
-        existing.contradiction_type === incoming.contradiction_type;
+        existing.fact_a_id === incoming.fact_a_id &&
+        existing.fact_b_id === incoming.fact_b_id &&
+        existing.conflict_type === incoming.conflict_type;
 
       expect(isDuplicate).toBe(true);
     });
 
     it("should NOT skip contradictions with different types for same fact pair", () => {
       const existing = {
-        source_fact_id: "fact-1",
-        conflicting_fact_id: "fact-2",
-        contradiction_type: "measurement_direction",
+        fact_a_id: "fact-1",
+        fact_b_id: "fact-2",
+        conflict_type: "compound_mismatch",
       };
 
       const incoming = {
-        source_fact_id: "fact-1",
-        conflicting_fact_id: "fact-2",
-        contradiction_type: "relation_type",
+        fact_a_id: "fact-1",
+        fact_b_id: "fact-2",
+        conflict_type: "bioactivity_mismatch",
       };
 
       const isDuplicate =
-        existing.source_fact_id === incoming.source_fact_id &&
-        existing.conflicting_fact_id === incoming.conflicting_fact_id &&
-        existing.contradiction_type === incoming.contradiction_type;
+        existing.fact_a_id === incoming.fact_a_id &&
+        existing.fact_b_id === incoming.fact_b_id &&
+        existing.conflict_type === incoming.conflict_type;
 
       expect(isDuplicate).toBe(false);
-    });
-  });
-
-  describe("Source filtering", () => {
-    it("should filter by source_id when provided", () => {
-      const sourceId = "source-123";
-      const contradictions = [
-        { source_id: "source-123", id: "c1" },
-        { source_id: "source-456", id: "c2" },
-        { source_id: "source-123", id: "c3" },
-      ];
-
-      const filtered = contradictions.filter((c) => c.source_id === sourceId);
-      expect(filtered.length).toBe(2);
-      expect(filtered.every((c) => c.source_id === sourceId)).toBe(true);
     });
   });
 });

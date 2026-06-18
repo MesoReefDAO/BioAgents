@@ -316,93 +316,93 @@ describe("contradictionDetector — pure logic unit tests", () => {
   });
 
   describe("deduplication logic", () => {
-    it("should consider same source_fact_id + conflicting_fact_id + type as duplicate", () => {
+    it("should consider same fact_a_id + fact_b_id + type as duplicate", () => {
       const existing = {
-        source_fact_id: "f1",
-        conflicting_fact_id: "f2",
-        contradiction_type: "measurement_direction",
+        fact_a_id: "f1",
+        fact_b_id: "f2",
+        conflict_type: "compound_mismatch",
       };
       const incoming = {
-        source_fact_id: "f1",
-        conflicting_fact_id: "f2",
-        contradiction_type: "measurement_direction",
+        fact_a_id: "f1",
+        fact_b_id: "f2",
+        conflict_type: "compound_mismatch",
       };
 
       const isDuplicate =
-        existing.source_fact_id === incoming.source_fact_id &&
-        existing.conflicting_fact_id === incoming.conflicting_fact_id &&
-        existing.contradiction_type === incoming.contradiction_type;
+        existing.fact_a_id === incoming.fact_a_id &&
+        existing.fact_b_id === incoming.fact_b_id &&
+        existing.conflict_type === incoming.conflict_type;
 
       expect(isDuplicate).toBe(true);
     });
 
     it("should NOT consider same fact pair with different type as duplicate", () => {
       const existing = {
-        source_fact_id: "f1",
-        conflicting_fact_id: "f2",
-        contradiction_type: "measurement_direction",
+        fact_a_id: "f1",
+        fact_b_id: "f2",
+        conflict_type: "compound_mismatch",
       };
       const incoming = {
-        source_fact_id: "f1",
-        conflicting_fact_id: "f2",
-        contradiction_type: "relation_type",
+        fact_a_id: "f1",
+        fact_b_id: "f2",
+        conflict_type: "bioactivity_mismatch",
       };
 
       const isDuplicate =
-        existing.source_fact_id === incoming.source_fact_id &&
-        existing.conflicting_fact_id === incoming.conflicting_fact_id &&
-        existing.contradiction_type === incoming.contradiction_type;
+        existing.fact_a_id === incoming.fact_a_id &&
+        existing.fact_b_id === incoming.fact_b_id &&
+        existing.conflict_type === incoming.conflict_type;
 
       expect(isDuplicate).toBe(false);
     });
 
     it("should NOT consider same type with different fact pair as duplicate", () => {
       const existing = {
-        source_fact_id: "f1",
-        conflicting_fact_id: "f2",
-        contradiction_type: "measurement_direction",
+        fact_a_id: "f1",
+        fact_b_id: "f2",
+        conflict_type: "compound_mismatch",
       };
       const incoming = {
-        source_fact_id: "f1",
-        conflicting_fact_id: "f3",
-        contradiction_type: "measurement_direction",
+        fact_a_id: "f1",
+        fact_b_id: "f3",
+        conflict_type: "compound_mismatch",
       };
 
       const isDuplicate =
-        existing.source_fact_id === incoming.source_fact_id &&
-        existing.conflicting_fact_id === incoming.conflicting_fact_id &&
-        existing.contradiction_type === incoming.contradiction_type;
+        existing.fact_a_id === incoming.fact_a_id &&
+        existing.fact_b_id === incoming.fact_b_id &&
+        existing.conflict_type === incoming.conflict_type;
 
       expect(isDuplicate).toBe(false);
     });
 
-    it("should NOT consider reversed fact pair as duplicate (different source_fact_id)", () => {
+    it("should NOT consider reversed fact pair as duplicate (different fact_a_id)", () => {
       const existing = {
-        source_fact_id: "f1",
-        conflicting_fact_id: "f2",
-        contradiction_type: "measurement_direction",
+        fact_a_id: "f1",
+        fact_b_id: "f2",
+        conflict_type: "compound_mismatch",
       };
       const incoming = {
-        source_fact_id: "f2",
-        conflicting_fact_id: "f1",
-        contradiction_type: "measurement_direction",
+        fact_a_id: "f2",
+        fact_b_id: "f1",
+        conflict_type: "compound_mismatch",
       };
 
       const isDuplicate =
-        existing.source_fact_id === incoming.source_fact_id &&
-        existing.conflicting_fact_id === incoming.conflicting_fact_id &&
-        existing.contradiction_type === incoming.contradiction_type;
+        existing.fact_a_id === incoming.fact_a_id &&
+        existing.fact_b_id === incoming.fact_b_id &&
+        existing.conflict_type === incoming.conflict_type;
 
       expect(isDuplicate).toBe(false);
     });
   });
 
-  describe("evidence pack structure", () => {
-    it("should build correct evidence pack for measurement_direction conflict", () => {
+  describe("metadata structure", () => {
+    it("should build correct metadata for measurement_direction conflict", () => {
       const factA = makeFact({ id: "f1", measurement_direction: "agonist", page: 3 });
       const factB = makeFact({ id: "f2", measurement_direction: "antagonist", page: 7 });
 
-      const evidencePack = {
+      const metadata = {
         source_a: {
           fact_id: factA.id,
           source: factA.source?.title || "",
@@ -418,17 +418,17 @@ describe("contradictionDetector — pure logic unit tests", () => {
         conflict_summary: `Conflicting measurement_direction: ${factA.measurement_direction} vs ${factB.measurement_direction}`,
       };
 
-      expect(evidencePack.source_a.fact_id).toBe("f1");
-      expect(evidencePack.source_b.fact_id).toBe("f2");
-      expect(evidencePack.conflict_summary).toContain("agonist");
-      expect(evidencePack.conflict_summary).toContain("antagonist");
+      expect(metadata.source_a.fact_id).toBe("f1");
+      expect(metadata.source_b.fact_id).toBe("f2");
+      expect(metadata.conflict_summary).toContain("agonist");
+      expect(metadata.conflict_summary).toContain("antagonist");
     });
 
-    it("should build correct evidence pack for relation_type conflict", () => {
+    it("should build correct metadata for relation_type conflict", () => {
       const factA = makeFact({ id: "f1", relation_type: "activates" });
       const factB = makeFact({ id: "f2", relation_type: "inhibits" });
 
-      const evidencePack = {
+      const metadata = {
         source_a: {
           fact_id: factA.id,
           source: factA.source?.title || "",
@@ -444,8 +444,8 @@ describe("contradictionDetector — pure logic unit tests", () => {
         conflict_summary: `Conflicting relation_type: ${factA.relation_type} vs ${factB.relation_type}`,
       };
 
-      expect(evidencePack.conflict_summary).toContain("activates");
-      expect(evidencePack.conflict_summary).toContain("inhibits");
+      expect(metadata.conflict_summary).toContain("activates");
+      expect(metadata.conflict_summary).toContain("inhibits");
     });
   });
 

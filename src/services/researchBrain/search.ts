@@ -243,34 +243,33 @@ export async function researchBrainSearch(params: {
   const contradictionWarnings = contradictions.map(
     (c: ResearchBioprospectingContradiction): EvidencePackContradiction => ({
       id: c.id,
-      contradictionType: c.contradiction_type,
+      contradictionType: c.conflict_type,
       sourceA: {
-        factId: c.source_fact_id,
+        factId: c.fact_a_id,
         claim:
-          (c as any).source_fact?.result_summary ||
-          (c as any).source_fact?.quote ||
+          (c as any).fact_a?.result_summary ||
+          (c as any).fact_a?.quote ||
           "",
-        sourceTitle: (c as any).source?.title || null,
-        doi: (c as any).source?.doi || null,
-        value: (c as any).evidence_pack?.source_a?.value || "",
-        provenance: (c as any).evidence_pack?.source_a?.provenance || "",
+        sourceTitle: (c as any).fact_a?.source?.title || null,
+        doi: (c as any).fact_a?.source?.doi || null,
+        value: (c.metadata as any)?.source_a?.value || "",
+        provenance: (c.metadata as any)?.source_a?.provenance || "",
       },
       sourceB: {
-        factId: c.conflicting_fact_id,
+        factId: c.fact_b_id,
         claim:
-          (c as any).conflicting_fact?.result_summary ||
-          (c as any).conflicting_fact?.quote ||
+          (c as any).fact_b?.result_summary ||
+          (c as any).fact_b?.quote ||
           "",
-        sourceTitle: (c as any).conflicting_fact?.source?.title || null,
-        doi: (c as any).conflicting_fact?.source?.doi || null,
-        value: (c as any).evidence_pack?.source_b?.value || "",
-        provenance: (c as any).evidence_pack?.source_b?.provenance || "",
+        sourceTitle: (c as any).fact_b?.source?.title || null,
+        doi: (c as any).fact_b?.source?.doi || null,
+        value: (c.metadata as any)?.source_b?.value || "",
+        provenance: (c.metadata as any)?.source_b?.provenance || "",
       },
-      conflictSummary: (c as any).evidence_pack?.conflict_summary || "",
-      resolutionStatus: c.resolution_status as
-        | "unresolved"
-        | "resolved"
-        | "dismissed",
+      conflictSummary: c.explanation || (c.metadata as any)?.conflict_summary || "",
+      severity: c.severity,
+      explanation: c.explanation,
+      status: c.status as "open" | "resolved" | "dismissed",
     }),
   );
 

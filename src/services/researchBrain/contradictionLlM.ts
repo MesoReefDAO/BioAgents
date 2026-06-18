@@ -156,11 +156,11 @@ Respond only with the JSON array.`;
     if (!factA || !factB) continue;
 
     const result = await upsertBioprospectingContradiction({
-      sourceId,
-      sourceFactId: c.sourceFactId,
-      conflictingFactId: c.conflictingFactId,
-      contradictionType: c.contradictionType,
-      evidencePack: {
+      factAId: c.sourceFactId,
+      factBId: c.conflictingFactId,
+      conflictType: mapLLMContradictionType(c.contradictionType),
+      explanation: c.explanation,
+      metadata: {
         source_a: {
           fact_id: factA.id,
           source: factA.source?.title || factA.doi || "unknown source",
@@ -175,7 +175,6 @@ Respond only with the JSON array.`;
         },
         conflict_summary: c.explanation,
       },
-      llmVersion: "1.0",
     });
     if (result) inserted++;
   }
@@ -193,4 +192,17 @@ function buildProvenance(fact: BioprospectingFact): string {
   if (fact.page != null) parts.push(`page ${fact.page}`);
   if (fact.chunk?.chunk_index != null) parts.push(`chunk ${fact.chunk.chunk_index}`);
   return parts.length > 0 ? parts.join(", ") : "unknown location";
+}
+
+/**
+ * Map LLM-returned contradiction types to the schema's check constraint values:
+ * 'compound_mismatch' | 'bioactivity_mismatch' | 'organism_mismatch' | 'measurement_mismatch'
+ */
+function mapLLMContradictionType(llmType: string): string {
+  const mapping: Record<string, string> = {
+    contextual: "bioactivity_mismatch",
+    measurement_impossibility: "measurement_mismatch",
+    directional_conflict: "measurement_mismatch",
+  };
+  return mapping[llmType] ?? "bioactivity_mismatch";
 }

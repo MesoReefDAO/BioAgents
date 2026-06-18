@@ -530,32 +530,17 @@ export type ExtractedBioprospectingFact = {
 
 export type ResearchBioprospectingContradiction = {
   id: string;
-  source_id: string;
-  source_fact_id: string;
-  conflicting_fact_id: string;
-  contradiction_type: string;
-  evidence_pack: {
-    source_a: {
-      fact_id: string;
-      source: string;
-      value: string;
-      provenance: string;
-    };
-    source_b: {
-      fact_id: string;
-      source: string;
-      value: string;
-      provenance: string;
-    };
-    conflict_summary: string;
-  };
-  rule_version: string | null;
-  llm_version: string | null;
-  resolution_status: string;
-  resolved_by: string | null;
+  fact_a_id: string;
+  fact_b_id: string;
+  conflict_type: string;
+  severity: string;
+  explanation: string | null;
+  status: string;
+  detected_at: string;
   resolved_at: string | null;
-  created_at: string;
-  updated_at: string;
+  resolved_by: string | null;
+  resolution_note: string | null;
+  metadata: Record<string, unknown>;
 };
 
 // ---------------------------------------------------------------------------
@@ -649,7 +634,9 @@ export type EvidencePackContradiction = {
     provenance: string;
   };
   conflictSummary: string;
-  resolutionStatus: "unresolved" | "resolved" | "dismissed";
+  severity: string;
+  explanation: string | null;
+  status: "open" | "resolved" | "dismissed";
 };
 
 // ---------------------------------------------------------------------------
@@ -671,10 +658,10 @@ export type EvidencePackContradiction = {
  * `GET /api/research-brain/contradictions/stats`. Each window
  * (`today`, `last7d`) carries six non-negative integer metrics:
  *
- *   - `found`     COUNT(contradictions WHERE created_at >= window)
- *   - `resolved`  COUNT(contradictions WHERE resolution_status='resolved'
+ *   - `found`     COUNT(contradictions WHERE detected_at >= window)
+ *   - `resolved`  COUNT(contradictions WHERE status='resolved'
  *                 AND resolved_at >= window)
- *   - `dismissed` COUNT(contradictions WHERE resolution_status='dismissed'
+ *   - `dismissed` COUNT(contradictions WHERE status='dismissed'
  *                 AND resolved_at >= window)
  *   - `pending`   max(0, found - resolved - dismissed) — clamped
  *                 server-side to defend against clock-skew drift

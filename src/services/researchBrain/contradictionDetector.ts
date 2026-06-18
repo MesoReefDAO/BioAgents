@@ -32,17 +32,13 @@ function buildKey(fact: BioprospectingFact): string | null {
   return `${normalizeForMatch(compound)}|${normalizeForMatch(bioactivity)}`;
 }
 
-function buildEvidencePack(
+function buildMetadata(
   factA: BioprospectingFact,
   factB: BioprospectingFact,
   field: "measurement_direction" | "relation_type",
   valueA: string,
   valueB: string,
-): {
-  source_a: { fact_id: string; source: string; value: string; provenance: string };
-  source_b: { fact_id: string; source: string; value: string; provenance: string };
-  conflict_summary: string;
-} {
+): Record<string, unknown> {
   const sourceA = factA.source?.title || factA.doi || "unknown source";
   const sourceB = factB.source?.title || factB.doi || "unknown source";
   const provenanceA = buildProvenance(factA);
@@ -119,7 +115,7 @@ export async function runRuleBasedDetection(params: {
       for (const factA of dirFacts) {
         for (const factB of oppositeFacts) {
           if (factA.id >= factB.id) continue; // avoid symmetric pairs
-          const evidencePack = buildEvidencePack(
+          const metadata = buildMetadata(
             factA,
             factB,
             "measurement_direction",
@@ -127,12 +123,10 @@ export async function runRuleBasedDetection(params: {
             factB.measurement_direction!,
           );
           const result = await upsertBioprospectingContradiction({
-            sourceId,
-            sourceFactId: factA.id,
-            conflictingFactId: factB.id,
-            contradictionType: "measurement_direction",
-            evidencePack,
-            ruleVersion: "1.0",
+            factAId: factA.id,
+            factBId: factB.id,
+            conflictType: "compound_mismatch",
+            metadata,
           });
           if (result) inserted++;
         }
@@ -157,7 +151,7 @@ export async function runRuleBasedDetection(params: {
       for (const factA of relFacts) {
         for (const factB of oppositeFacts) {
           if (factA.id >= factB.id) continue;
-          const evidencePack = buildEvidencePack(
+          const metadata = buildMetadata(
             factA,
             factB,
             "relation_type",
@@ -165,12 +159,10 @@ export async function runRuleBasedDetection(params: {
             factB.relation_type,
           );
           const result = await upsertBioprospectingContradiction({
-            sourceId,
-            sourceFactId: factA.id,
-            conflictingFactId: factB.id,
-            contradictionType: "relation_type",
-            evidencePack,
-            ruleVersion: "1.0",
+            factAId: factA.id,
+            factBId: factB.id,
+            conflictType: "bioactivity_mismatch",
+            metadata,
           });
           if (result) inserted++;
         }

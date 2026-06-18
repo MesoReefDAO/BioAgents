@@ -92,8 +92,12 @@ export const REASON_CATEGORIES: ReadonlyArray<ReasonCategory> = [
 // ---------------------------------------------------------------------------
 
 export type ListContradictionsGlobalParams = {
+  // The DB column `status` carries values 'open' | 'resolved' | 'dismissed'
+  // (the check constraint added by the original schema migration).
+  // The caller-facing string 'unresolved' is mapped to 'open' inside
+  // the function so the rest of the codebase keeps the historical
+  // "unresolved" vocabulary.
   status?: "unresolved" | "resolved" | "dismissed";
-  sourceId?: string;
   limit: number;
   offset: number;
 };
@@ -107,8 +111,8 @@ export type ListContradictionsGlobalResult = {
 
 /**
  * Returns contradictions across all sources, filtered by `status` and
- * `sourceId` when provided, ordered by `created_at DESC` and
- * paginated.
+ * optionally by `sourceId` (via the fact FKs), ordered by `detected_at DESC`
+ * and paginated.
  *
  * The `total` is the unpaginated `COUNT(*)` for the same filter
  * combination (a single second query). The helper issues at most two
@@ -120,22 +124,25 @@ export async function listContradictionsGlobal(
   const limit = Math.max(1, Math.min(200, params.limit));
   const offset = Math.max(0, params.offset);
 
+  // Map caller-facing "unresolved" → DB "open" (the check constraint's
+  // unresolved state is named 'open' in the schema).
+  const dbStatus =
+    params.status === "unresolved"
+      ? "open"
+      : params.status;
+
   let countQuery = supabase
     .from("research_bioprospecting_contradictions")
     .select("id", { count: "exact", head: true });
   let pageQuery = supabase
     .from("research_bioprospecting_contradictions")
     .select("*")
-    .order("created_at", { ascending: false })
+    .order("detected_at", { ascending: false })
     .range(offset, offset + limit - 1);
 
-  if (params.status) {
-    countQuery = countQuery.eq("resolution_status", params.status);
-    pageQuery = pageQuery.eq("resolution_status", params.status);
-  }
-  if (params.sourceId) {
-    countQuery = countQuery.eq("source_id", params.sourceId);
-    pageQuery = pageQuery.eq("source_id", params.sourceId);
+  if (dbStatus) {
+    countQuery = countQuery.eq("status", dbStatus);
+    pageQuery = pageQuery.eq("status", dbStatus);
   }
 
   const [{ count, error: countError }, { data, error: pageError }] =

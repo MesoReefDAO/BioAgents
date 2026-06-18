@@ -1517,8 +1517,37 @@ export async function searchBioprospectingFacts(
   const facts = new Map<string, BioprospectingFact>();
   const allowedSourceIds = await resolveBioprospectingSourceIds(params);
 
+  // Phase 3 of bioprospecting-semantic-dedup: hide merged siblings by
+  // default. PostgREST does NOT support `.not("id", "in", "(SELECT ...)")`
+  // — it interprets the SQL subquery string as a UUID literal and fails
+  // with PGRST202/22P02. We fetch the merged ids once and filter in JS.
+  // The dedup_edges table is small (hundreds of rows in production) so
+  // this is cheap. Setting `includeDuplicates: true` skips both the
+  // fetch and the filter, returning canonical + merged rows.
+  let mergedIds: Set<string> | null = null;
+  if (!params.includeDuplicates) {
+    const { data: edgeRows, error: edgeError } = await supabase
+      .from("research_bioprospecting_fact_edges")
+      .select("merged_fact_id");
+    if (edgeError) {
+      logger.warn(
+        { err: edgeError },
+        "bioprospecting_search_dedup_edges_load_failed_continuing",
+      );
+    } else {
+      mergedIds = new Set(
+        (edgeRows || []).map((r: { merged_fact_id: string }) => r.merged_fact_id),
+      );
+    }
+  }
+
   const addFacts = (rows: BioprospectingFact[]) => {
-    for (const row of rows) facts.set(row.id, row);
+    for (const row of rows) {
+      // Drop merged siblings in JS so the `selectFacts()` SQL stays
+      // simple. No-op when `mergedIds` is null (includeDuplicates=true).
+      if (mergedIds && mergedIds.has(row.id)) continue;
+      facts.set(row.id, row);
+    }
   };
 
   const selectFacts = () => {
@@ -1527,19 +1556,6 @@ export async function searchBioprospectingFacts(
       .select(
         "*, source:research_sources(*), chunk:research_evidence_chunks(*)",
       );
-    // Phase 3 of bioprospecting-semantic-dedup: hide merged siblings by
-    // default. The filter is a SQL subselect against the dedup edge
-    // table — applied here, at the SQL layer, so the post-filter
-    // result set is what gets ranked and sliced. Setting
-    // `includeDuplicates: true` skips the filter and returns both
-    // canonical and merged rows.
-    if (!params.includeDuplicates) {
-      request = request.not(
-        "id",
-        "in",
-        "(SELECT merged_fact_id FROM research_bioprospecting_fact_edges)",
-      );
-    }
     request = applyBioprospectingSourceFilter(
       request,
       params,
@@ -1597,7 +1613,15 @@ export async function searchBioprospectingFacts(
 
   for (const candidate of [...candidates, ...tokenCandidates]) {
     if (facts.size >= limit) break;
-    const escaped = `%${escapeIlike(candidate)}%`;
+    // PostgREST rejects .or() chains whose concatenated URL exceeds its
+    // header / parser limit (manifests as PGRST100 "failed to parse
+    // logic tree" when the candidate is >~200 chars and the chain has
+    // 8 ilike clauses). Truncate to 100 chars BEFORE escaping so the
+    // longest possible payload is ~8 * (100 + 5) = 840 chars in the
+    // URL — well under PostgREST's limit. ilike is substring-match so
+    // we still hit long compounds that contain the truncated prefix.
+    const truncated = candidate.length > 100 ? candidate.slice(0, 100) : candidate;
+    const escaped = `%${escapeIlike(truncated)}%`;
     const { data, error } = await selectFacts()
       .or(
         [

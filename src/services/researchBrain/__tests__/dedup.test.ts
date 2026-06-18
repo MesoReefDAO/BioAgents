@@ -637,28 +637,43 @@ describe("dedup — backfillBioprospectingFactDedup (dry-run)", () => {
 // ---------------------------------------------------------------------------
 
 describe("dedup — searchBioprospectingFacts includeDuplicates flag", () => {
-  it("applies the merged-row filter by default", async () => {
+  // PostgREST does not support `.not("id", "in", "(SELECT …)")` — it
+  // interprets the subquery string as a UUID literal and errors. The
+  // dedup filter is therefore applied in JS: searchBioprospectingFacts
+  // fetches the merged_fact_ids once and drops matching rows from the
+  // result set. See db.ts:1530 ("hide merged siblings by default").
+  it("fetches merged_fact_ids and applies the JS filter by default", async () => {
     client = scriptedMock(
-      [{ kind: "many", data: [], error: null }], // measure filter fallback
+      [
+        // 1) edge rows fetch (merged_fact_ids)
+        { kind: "many", data: [{ merged_fact_id: "merged-1" }], error: null },
+        // 2) one candidate query that returns a canonical + a merged sibling
+        { kind: "many", data: [
+          { id: "canonical-1", compound: "Quercetin" },
+          { id: "merged-1", compound: "Quercetin" },
+        ], error: null },
+        // 3) candidate query for the next iteration returns []
+        { kind: "many", data: [], error: null },
+      ],
       calls,
     );
     setMockServiceClient(() => client);
-    await searchBioprospectingFacts({ query: "quercetin" });
-    const dedupNot = calls.find(
-      (c) =>
-        c.method === "not" &&
-        typeof c.args[0] === "string" &&
-        c.args[0] === "id" &&
-        c.args[1] === "in" &&
-        typeof c.args[2] === "string" &&
-        (c.args[2] as string).includes("research_bioprospecting_fact_edges"),
+    const results = await searchBioprospectingFacts({ query: "quercetin" });
+    // The merged sibling should be filtered out in JS.
+    expect(results.map((r) => r.id)).toEqual(["canonical-1"]);
+    // The first call must be the edge fetch.
+    const edgesCall = calls.find(
+      (c) => c.method === "from" && c.args[0] === "research_bioprospecting_fact_edges",
     );
-    expect(dedupNot).toBeDefined();
+    expect(edgesCall).toBeDefined();
   });
 
-  it("omits the merged-row filter when includeDuplicates is true", async () => {
+  it("skips the edge fetch when includeDuplicates is true", async () => {
     client = scriptedMock(
-      [{ kind: "many", data: [], error: null }],
+      [
+        // only candidate queries, no edge fetch
+        { kind: "many", data: [], error: null },
+      ],
       calls,
     );
     setMockServiceClient(() => client);
@@ -666,16 +681,11 @@ describe("dedup — searchBioprospectingFacts includeDuplicates flag", () => {
       query: "quercetin",
       includeDuplicates: true,
     });
-    const dedupNot = calls.find(
-      (c) =>
-        c.method === "not" &&
-        typeof c.args[0] === "string" &&
-        c.args[0] === "id" &&
-        c.args[1] === "in" &&
-        typeof c.args[2] === "string" &&
-        (c.args[2] as string).includes("research_bioprospecting_fact_edges"),
+    // No edges fetch should happen.
+    const edgesCall = calls.find(
+      (c) => c.method === "from" && c.args[0] === "research_bioprospecting_fact_edges",
     );
-    expect(dedupNot).toBeUndefined();
+    expect(edgesCall).toBeUndefined();
   });
 });
 

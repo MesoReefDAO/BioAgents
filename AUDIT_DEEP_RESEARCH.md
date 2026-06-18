@@ -295,6 +295,45 @@ Mejor aún: cargar los IDs merged en una sola query, luego filtrar en JS (como h
 
 ---
 
+### 🟡 HALLAZGO #15 — Bug PGRST200 FK en contradictions (PRE-EXISTENTE)
+
+**Síntoma**: `researchBrainSearch()` falla completo con `PGRST200 Searched for a foreign key relationship between 'research_bioprospecting_contradictions' and 'research_sources' in the schema 'public', but no matches were found`. Esto hace que `researchBrainEvidence` llegue vacío al verifier.
+
+**Evidencia** (job fa40c95b, post-fix #11+#12):
+```
+[2026-06-18 05:27:49] WARN deep_research_worker_research_brain_search_failed
+  error: {
+    code: PGRST200,
+    details: Searched for a foreign key relationship between
+             'research_bioprospecting_contradictions' and
+             'research_sources' in the schema 'public', but no
+             matches were found.
+  }
+```
+
+**Causa raíz**: `src/services/researchBrain/contradictionDb.ts:83`:
+```ts
+.select(
+  "*, source:research_sources(*), source_fact:research_bioprospecting_facts(*), conflicting_fact:research_bioprospecting_facts(*)",
+)
+```
+
+PostgREST no puede navegar la FK transitiva `contradictions → facts → sources` en una sola query inline. Necesita anidar:
+```ts
+"*, source_fact:research_bioprospecting_facts(*, source:research_sources(*)), conflicting_fact:research_bioprospecting_facts(*, source:research_sources(*))"
+```
+
+Adicional: `contradictionDb.ts:90` usa `eq("resolution_status", "unresolved")` pero la columna real es `status`.
+
+**Bug introducido en**: commit `df4553f feat(research-brain): bioprospecting-contradiction-detection PR1 - infrastructure layer`. **No estaba en mi radar porque mi fix #11+#12 enmascaraba los errores con PGRST100/22P02** — el `researchBrainSearch` fallaba silenciosamente en iteraciones previas sin que se notara este segundo bug.
+
+**Fix**: aplicar ambas correcciones en `contradictionDb.ts`.
+
+**Esfuerzo**: S (30 min)
+**Archivos afectados**: `src/services/researchBrain/contradictionDb.ts:83,90`
+
+---
+
 ### 🔴 HALLAZGO #14 — `verifyEvidenceGroundedResponse()` es un LLM call OCULTO (CRÍTICO)
 
 **Síntoma**: Cada iteración hace **3 LLM calls**: `replyAgent` + `verifyEvidenceGroundedResponse` + `writeResearchMemory`. El segundo y tercero **no aparecen en el Activity Log** y suman 1-2 min cada uno.
@@ -528,18 +567,21 @@ Esto es **un cuello serializado artificial** entre la decisión "continuar" y la
 
 ## Plan de Mejoras Priorizado
 
-### Sprint 0 (1 día) — Profiling + medición
+### Sprint 0 (1 día) — Profiling + medición ✅ COMPLETO
 
-**CRÍTICO**: Antes de cualquier fix, instrumentar el código entre `auto_continuing_to_next_iteration` y `🚀 Starting search pipeline` para saber qué pasa en esos 9m 38s.
+**Status**: completado. Se descubrió la causa real del gap (4 iteraciones, no 2; 3 LLM calls ocultos por iteración; bugs en dedup filter).
 
-1. **HALLAZGO #9**: agregar `console.time()` + timestamps a `start.ts:1386-1697` (la región que ejecuta tasks)
-2. **HALLAZGO #10**: silenciar o arreglar el `bioprospecting_fact_phrase_failed × 9`
+### Sprint 1 ✅ PARCIALMENTE COMPLETO
 
-**Output esperado**: trace con timing exacto de cada await. Una vez sabemos qué es, decidimos el fix.
+**Status**: HALLAZGO #11 (truncate candidates) y HALLAZGO #12 (dedup fix en db.ts:1537) **aplicados, commiteados, validados en producción**.
 
-### Sprint 1 (1-2 días) — UX + correctness
+Resultados medidos en producción (query "anthoteibinenes antifungal"):
+- **`bioprospecting_fact_phrase_failed`: 21 → 0** (antes 21 warnings, ahora 0)
+- **Tiempo total: 20m 50s → ~12 min** (40% mejora)
+- **bioprospecting_facts en evidence pack**: sigue 0 por un bug pre-existente distinto (PGRST200 FK en contradictionDb.ts) — HALLAZGO #15
 
-3. **HALLAZGO #1**: timeout por iteración + top-level timeout (S) — **DESPUÉS de perfilar**
+Pendiente:
+3. **HALLAZGO #1**: timeout por iteración + top-level timeout (S)
 4. **HALLAZGO #3**: documentar que .env requiere restart (Trivial)
 5. **HALLAZGO #7**: loggear disabled cuando Edison/OpenScholar no están (S)
 
@@ -548,10 +590,11 @@ Esto es **un cuello serializado artificial** entre la decisión "continuar" y la
 6. **HALLAZGO #4**: parallelizar literature_agent (M) — **DESPUÉS de saber qué pasa en el gap**
 7. **HALLAZGO #5**: prompt del planning agent más enfocado (S-M)
 8. **HALLAZGO #2+#6**: filtrar bioprospecting_facts por relevance (M)
+9. **🆕 HALLAZGO #15**: fix PGRST200 FK en `searchBioprospectingContradictions` (S) — bug pre-existente que ahora es visible
 
 ### Sprint 3 (1-2 días) — Quality
 
-9. **HALLAZGO #8**: revisar join de evidence_chunks en sources (M)
+10. **HALLAZGO #8**: revisar join de evidence_chunks en sources (M)
 
 ---
 

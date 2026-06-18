@@ -411,3 +411,36 @@ export async function notifyPaperFailed(
 
 // Alias for backwards compatibility
 export { notify as publishNotification };
+
+/**
+ * Emit a per-source completion event for a deep-research literature task.
+ * Lets the UI render a per-source evidence panel as each source finishes
+ * (OpenScholar, Edison, Knowledge) without waiting for the whole task.
+ *
+ * Worker code is responsible for calling this once per literature source
+ * after it resolves (ok, empty, or failed).
+ */
+export async function notifyAgentSourceCompleted(
+  jobId: string,
+  conversationId: string,
+  source: {
+    sourceName:
+      | "OPENSCHOLAR"
+      | "KNOWLEDGE"
+      | "EDISON"
+      | "BIOLIT"
+      | "BIOLITDEEP";
+    status: "ok" | "empty" | "failed";
+    count: number;
+    durationMs: number;
+    error?: string;
+    iteration: number;
+  },
+): Promise<void> {
+  await notify({
+    type: "agent:source_completed",
+    jobId,
+    conversationId,
+    source,
+  });
+}

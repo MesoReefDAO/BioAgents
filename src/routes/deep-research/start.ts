@@ -1460,8 +1460,29 @@ async function runDeepResearch(params: {
               ? "BIOLITDEEP"
               : "EDISON";
 
-          // Build list of literature promises based on configured sources
+          // Build list of literature promises based on configured sources.
+          // Each source independently appends to task.sources[] with
+          // provenance (status, count, durationMs, error). task.output is
+          // rebuilt from sources[] at the end so downstream agents
+          // (hypothesis, reply, verifier) see the same concatenated text.
           const literaturePromises: Promise<void>[] = [];
+
+          const appendSource = (result: Awaited<ReturnType<typeof literatureAgent>>) => {
+            if (!task.sources) task.sources = [];
+            task.sources.push({
+              sourceName: result.sourceName,
+              status: result.status,
+              count: result.count ?? 0,
+              durationMs: result.durationMs,
+              finishedAt: result.end,
+              output: result.output,
+              error: result.error,
+              jobId: result.jobId,
+            });
+            if (result.jobId && !task.jobId) {
+              task.jobId = result.jobId;
+            }
+          };
 
           // OpenScholar (enabled if OPENSCHOLAR_API_URL is configured)
           if (process.env.OPENSCHOLAR_API_URL) {
@@ -1469,9 +1490,7 @@ async function runDeepResearch(params: {
               objective: task.objective,
               type: "OPENSCHOLAR",
             }).then(async (result) => {
-              if (result.count && result.count > 0) {
-                task.output += `${result.output}\n\n`;
-              }
+              appendSource(result);
               if (conversationState.id) {
                 await writeStateSerialized();
                 logger.info({ count: result.count }, "openscholar_completed");
@@ -1490,12 +1509,7 @@ async function runDeepResearch(params: {
             type: primaryLiteratureType,
             onPollUpdate,
           }).then(async (result) => {
-            // Always append for Edison/BioLit (no count filtering)
-            task.output += `${result.output}\n\n`;
-            // Capture jobId from primary literature (Edison or BioLit)
-            if (result.jobId) {
-              task.jobId = result.jobId;
-            }
+            appendSource(result);
             if (conversationState.id) {
               await writeStateSerialized();
             }
@@ -1512,9 +1526,7 @@ async function runDeepResearch(params: {
               objective: task.objective,
               type: "KNOWLEDGE",
             }).then(async (result) => {
-              if (result.count && result.count > 0) {
-                task.output += `${result.output}\n\n`;
-              }
+              appendSource(result);
               if (conversationState.id) {
                 await writeStateSerialized();
                 logger.info({ count: result.count }, "knowledge_completed");
@@ -1529,6 +1541,15 @@ async function runDeepResearch(params: {
 
           // Wait for all enabled sources to complete
           await Promise.all(literaturePromises);
+
+          // Derive task.output from sources[] so downstream agents
+          // (hypothesis, reflection, reply, verifier) see the same flat
+          // string they got before this refactor. Skip failed sources to
+          // avoid leaking error messages into the hypothesis prompt.
+          task.output = (task.sources ?? [])
+            .filter((s) => s.status !== "failed")
+            .map((s) => `${s.output}\n\n`)
+            .join("");
 
           // Set end timestamp after all are done
           task.end = new Date().toISOString();

@@ -176,7 +176,8 @@ export type NotificationType =
   | "ingestion:started"
   | "ingestion:progress"
   | "ingestion:completed"
-  | "ingestion:failed";
+  | "ingestion:failed"
+  | "agent:source_completed";
 
 /**
  * Job data for document ingestion queue
@@ -308,4 +309,23 @@ export interface Notification {
   progress?: { stage: string; percent: number };
   description?: string;
   error?: string;
+  /**
+   * Per-source provenance payload (only present on agent:source_completed).
+   * Lets the UI render a real-time per-source evidence panel even before
+   * the full task completes.
+   */
+  source?: {
+    /** Matches LiteratureType: OPENSCHOLAR | KNOWLEDGE | EDISON | BIOLIT | BIOLITDEEP */
+    sourceName: "OPENSCHOLAR" | "KNOWLEDGE" | "EDISON" | "BIOLIT" | "BIOLITDEEP";
+    /** "ok" | "empty" | "failed" — see LiteratureSourceStatus */
+    status: "ok" | "empty" | "failed";
+    /** Number of papers/chunks returned (0 when status !== "ok"). */
+    count: number;
+    /** Wall-clock duration in ms. Always recorded. */
+    durationMs: number;
+    /** Human-readable error message when status === "failed". */
+    error?: string;
+    /** Iteration number inside the deep-research run (1-based). */
+    iteration: number;
+  };
 }

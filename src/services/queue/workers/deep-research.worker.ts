@@ -14,6 +14,7 @@
 import { Job, Worker } from "bullmq";
 import type {
   ConversationState,
+  LiteratureSourceResult,
   OnPollUpdate,
   PlanTask,
   State,
@@ -38,6 +39,7 @@ import logger from "../../../utils/logger";
 import { markRunFinished, touchRun } from "../../deep-research/run-guard";
 import { getBullMQConnection } from "../connection";
 import {
+  notifyAgentSourceCompleted,
   notifyJobCompleted,
   notifyJobFailed,
   notifyJobProgress,
@@ -704,8 +706,32 @@ async function processDeepResearchJob(
             ? "BIOLITDEEP"
             : "EDISON";
 
-        // Build list of literature promises based on configured sources
+        // Build list of literature promises based on configured sources.
+        // Each source independently appends to task.sources[] with provenance
+        // (status, count, durationMs, error). task.output is rebuilt from
+        // sources[] at the end so downstream agents (hypothesis, reply,
+        // verifier) see the same concatenated text as before.
         const literaturePromises: Promise<void>[] = [];
+        const currentIteration = job.data.iterationNumber ?? 1;
+
+        const appendSource = (result: Awaited<ReturnType<typeof literatureAgent>>) => {
+          if (!task.sources) task.sources = [];
+          task.sources.push({
+            sourceName: result.sourceName,
+            status: result.status,
+            count: result.count ?? 0,
+            durationMs: result.durationMs,
+            finishedAt: result.end,
+            output: result.output,
+            error: result.error,
+            jobId: result.jobId,
+          });
+          // Persist jobId from primary literature (Edison/BioLit) at the task
+          // level too so existing callers that read task.jobId keep working.
+          if (result.jobId && !task.jobId) {
+            task.jobId = result.jobId;
+          }
+        };
 
         // OpenScholar (enabled if OPENSCHOLAR_API_URL is configured)
         if (process.env.OPENSCHOLAR_API_URL) {
@@ -713,7 +739,19 @@ async function processDeepResearchJob(
             objective: task.objective,
             type: "OPENSCHOLAR",
           }).then(async (result) => {
-            task.output += `${result.output}\n\n`;
+            appendSource(result);
+            await notifyAgentSourceCompleted(
+              job.id!,
+              conversationId,
+              {
+                sourceName: result.sourceName,
+                status: result.status,
+                count: result.count ?? 0,
+                durationMs: result.durationMs,
+                error: result.error,
+                iteration: currentIteration,
+              },
+            );
             if (activeConversationState.id) {
               await writeStateSerialized!();
             }
@@ -727,11 +765,19 @@ async function processDeepResearchJob(
           type: primaryLiteratureType,
           onPollUpdate,
         }).then(async (result) => {
-          task.output += `${result.output}\n\n`;
-          // Capture jobId from primary literature (Edison)
-          if (result.jobId) {
-            task.jobId = result.jobId;
-          }
+          appendSource(result);
+          await notifyAgentSourceCompleted(
+            job.id!,
+            conversationId,
+            {
+              sourceName: result.sourceName,
+              status: result.status,
+              count: result.count ?? 0,
+              durationMs: result.durationMs,
+              error: result.error,
+              iteration: currentIteration,
+            },
+          );
           if (activeConversationState.id) {
             await writeStateSerialized!();
           }
@@ -744,7 +790,19 @@ async function processDeepResearchJob(
             objective: task.objective,
             type: "KNOWLEDGE",
           }).then(async (result) => {
-            task.output += `${result.output}\n\n`;
+            appendSource(result);
+            await notifyAgentSourceCompleted(
+              job.id!,
+              conversationId,
+              {
+                sourceName: result.sourceName,
+                status: result.status,
+                count: result.count ?? 0,
+                durationMs: result.durationMs,
+                error: result.error,
+                iteration: currentIteration,
+              },
+            );
             if (activeConversationState.id) {
               await writeStateSerialized!();
             }
@@ -753,6 +811,15 @@ async function processDeepResearchJob(
         }
 
         await Promise.all(literaturePromises);
+
+        // Derive task.output from sources[] so downstream agents
+        // (hypothesis, reflection, reply, verifier) see the same flat
+        // string they got before this refactor. Skip failed sources to
+        // avoid leaking error messages into the hypothesis prompt.
+        task.output = (task.sources ?? [])
+          .filter((s) => s.status !== "failed")
+          .map((s) => `${s.output}\n\n`)
+          .join("");
 
         task.end = new Date().toISOString();
         if (activeConversationState.id) {

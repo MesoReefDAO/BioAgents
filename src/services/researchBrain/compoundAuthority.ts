@@ -153,6 +153,137 @@ export function normalizeForCompoundLookup(value: string | null | undefined): st
 // ---------------------------------------------------------------------------
 
 /**
+ * Generate a list of alternative compound names to try when the
+ * canonical name returns a PubChem 404. The goal is to RECOVER
+ * `failed` facts whose spelling is correct for the paper's domain
+ * (e.g. "alpha-mangostin" in a marine paper) but is one tweak away
+ * from what PubChem's PUG-REST recognises.
+ *
+ * The pipeline is intentionally conservative: it returns a SMALL
+ * ordered list of high-precision candidates. We do NOT do
+ * edit-distance fuzzy search; PubChem is sensitive to its own
+ * canonical index and a Levenshtein match is more likely to land
+ * on the wrong compound than the right one. Instead we strip
+ * determinable surface variants:
+ *
+ *   1. Parenthesized chunks — "curcumin (from Curcuma longa)"
+ *      becomes "curcumin". PubChem rarely indexes the parenthetical
+ *      provenance note.
+ *   2. Stereochemistry prefixes — (E)-, (Z)-, (R)-, (S)-, (+)-, (-)-,
+ *      (±)-. PubChem's name index is the racemate/canonical form.
+ *   3. D/L / d-/l- sugar prefixes — D-glucose -> glucose, L-arginine
+ *      -> arginine.
+ *   4. Greek-letter stereo descriptors — alpha, beta, gamma, delta,
+ *      omega. We strip them as a STANDALONE word (preceded by a
+ *      hyphen) but keep them when they are part of a name like
+ *      "alpha-tocopherol" -> "tocopherol" (the prefix IS
+ *      meaningless on its own in PubChem).
+ *   5. "n-" (normal) and "iso-" chain descriptors — n-butanol ->
+ *      butanol, isovaleric acid -> valeric acid (the latter is
+ *      debated; we only strip the most common ones).
+ *   6. The original name is returned FIRST so the caller can short-
+ *      circuit if a different path already tried it.
+ *
+ * The function is PURE: no IO, no LLM, no PubChem. The result is
+ * de-duplicated and the original name is included at index 0.
+ * Length is bounded: the caller should stop after the first hit.
+ *
+ * Examples:
+ *   buildCompoundNameVariants("alpha-mangostin")
+ *     -> ["alpha-mangostin", "mangostin"]
+ *   buildCompoundNameVariants("(E)-resveratrol")
+ *     -> ["(E)-resveratrol", "resveratrol"]
+ *   buildCompoundNameVariants("quercetin-3-O-glucoside")
+ *     -> ["quercetin-3-O-glucoside", "quercetin 3 O glucoside",
+ *         "quercetin glucoside", "quercetin"]
+ *   buildCompoundNameVariants("D-glucose")
+ *     -> ["D-glucose", "glucose"]
+ *   buildCompoundNameVariants("curcumin (from Curcuma longa)")
+ *     -> ["curcumin (from Curcuma longa)", "curcumin"]
+ */
+export function buildCompoundNameVariants(name: string | null | undefined): string[] {
+  if (!name || typeof name !== "string") return [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const add = (s: string) => {
+    const trimmed = s.trim();
+    if (!trimmed) return;
+    const key = trimmed.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(trimmed);
+  };
+
+  add(name);
+
+  // 1) Strip parenthesized chunks: "curcumin (from Curcuma longa)"
+  //    "kaempferol-3-O-rutinoside (NAR)". We collapse multiple
+  //    parentheticals and surrounding whitespace.
+  const withoutParens = name
+    .replace(/\s*\([^)]*\)\s*/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  add(withoutParens);
+
+  // 2) Stereochemistry prefixes at the start: "(E)-", "(Z)-", "(R)-",
+  //    "(S)-", "(+)-", "(-)-", "(±)-" and the unparenthesized forms
+  //    "E-", "Z-", "R-", "S-", "D-", "L-", "d-", "l-".
+  //    Match: optional parens around a single letter (E/Z/R/S) or a
+  //    sign (+/-/±), followed by a hyphen, followed by optional space.
+  const stereoPrefix = /^\s*[(\[]?\s*(?:[+\-±]|[EeZzRrSs](?![A-Za-z]))\s*[)\]]?\s*-\s*/;
+  const withoutStereo = name.replace(stereoPrefix, "").trim();
+  add(withoutStereo);
+
+  // 3) D/L sugar prefix standalone: "D-glucose" / "L-arginine" / "d-Glucose".
+  //    Conservative: only strip a single ASCII letter followed by a hyphen
+  //    at the start of the name.
+  const dlPrefix = /^\s*[dlDL]-\s*/;
+  const withoutDL = name.replace(dlPrefix, "").trim();
+  add(withoutDL);
+
+  // 4) Greek-letter stereo descriptors as a HYPHEN-PREFIXED word:
+  //    "alpha-mangostin" -> "mangostin". The descriptor must be at the
+  //    start, lowercase, and hyphen-joined (so we don't strip the
+  //    "alpha" in "alpha tocopherol acetate" which is a different
+  //    compound).
+  const greekPrefix = /^\s*(?:alpha|beta|gamma|delta|omega)-\s*/i;
+  const withoutGreek = name.replace(greekPrefix, "").trim();
+  add(withoutGreek);
+
+  // 5) "n-" and "iso-" chain descriptors at the start: "n-butanol"
+  //    -> "butanol", "iso-valeric acid" -> "valeric acid". Same rule
+  //    as the Greek prefix: must be a hyphen-joined prefix.
+  const chainPrefix = /^\s*(?:n|iso|sec|tert|normal|ortho|meta|para)-\s*/i;
+  const withoutChain = name.replace(chainPrefix, "").trim();
+  add(withoutChain);
+
+  // 6) Token-strip heuristic: try the longest prefix of words
+  //    (greedy from the front). "marine compound 12B" -> first try
+  //    "marine compound 12B", then "marine compound", then
+  //    "marine". The function never returns an empty string.
+  //
+  //    We DON'T apply this when the original name has only one word
+  //    (nothing to strip). And we don't apply it when the
+  //    resulting prefix is one of the stereo/greek/dl/chain
+  //    prefixes on its own (would land on "alpha" which is not a
+  //    compound name).
+  //
+  //    We apply this to the WITHOUT-PARENS form so a parenthetical
+  //    tail does not contaminate the prefix candidates.
+  const tokens = withoutParens.split(/\s+/).filter(Boolean);
+  if (tokens.length >= 2) {
+    for (let n = tokens.length - 1; n >= 1; n--) {
+      const prefix = tokens.slice(0, n).join(" ");
+      if (/^(?:alpha|beta|gamma|delta|omega|iso|n|sec|tert|normal|ortho|meta|para|[dlDL])$/i.test(prefix)) {
+        continue;
+      }
+      add(prefix);
+    }
+  }
+
+  return out;
+}
+/**
  * Resolve a freshly-extracted compound value to a canonical id and a
  * status. The contract:
  *   1. `looksLikeExtract(value)` true  -> `{ canonicalId: null, status: 'skipped', at: null, error: 'extract_or_mixture' }`
@@ -1420,6 +1551,24 @@ export type NormalizeBackfillParams = {
   fetchImpl?: typeof fetch;
   /** Inject a clock (tests). */
   now?: () => number;
+  /** Include facts in `failed` state in the candidate set, with
+   * their `compound_authority_attempts` counter RESET to 0 for
+   * this pass. Intended for the recovery flow that re-runs the
+   * fuzzy PubChem search against facts that exhausted their
+   * standard retry budget. Default: `false` (do not touch
+   * `failed` facts). */
+  includeFailed?: boolean;
+  /** When the original compound name returns a PubChem 404, try
+   * the deterministic name variants produced by
+   * `buildCompoundNameVariants` before giving up. Each variant
+   * is tried in order; the first CID hit wins. Default: `false`
+   * (match the original-name-only contract of PR #2). */
+  tryFuzzyVariants?: boolean;
+  /** Cap on the number of fuzzy variant attempts per fact.
+   * Default: 3 (most of the recovery value is in the first 2-3
+   * candidates; the rest are diminishing returns). Set to 0 to
+   * disable regardless of `tryFuzzyVariants`. */
+  maxVariantsPerFact?: number;
 };
 
 export type BackfillSummary = {
@@ -1429,6 +1578,15 @@ export type BackfillSummary = {
   pubchemMisses: number;
   retriesScheduled: number;
   failed: number;
+  /** Facts recovered by a fuzzy variant (i.e. the original name
+   * returned 404 but a variant returned a CID). Reported
+   * separately so operators can tell how much of the run is
+   * recovery vs. clean hits. */
+  fuzzyHits: number;
+  /** Cumulative count of PubChem calls issued to fuzzy variants
+   * (does not include the first attempt with the original name).
+   * Useful for cost guard-rails. */
+  fuzzyCalls: number;
   elapsed: number;
 };
 
@@ -1467,6 +1625,12 @@ export async function normalizeBioprospectingCompounds(
 ): Promise<BackfillSummary> {
   const limit = Math.max(1, Math.min(MAX_BACKFILL_LIMIT, params.limit ?? 50));
   const onlyMissing = params.onlyMissing ?? true;
+  const includeFailed = params.includeFailed ?? false;
+  const tryFuzzyVariants = params.tryFuzzyVariants ?? false;
+  const maxVariantsPerFact = Math.max(
+    0,
+    Math.min(20, params.maxVariantsPerFact ?? 3),
+  );
   // Resolve rate limit / max retries from the env-driven config
   // (read once at module load) and fall back to in-code defaults
   // when neither env nor explicit override is present. The spec
@@ -1484,6 +1648,8 @@ export async function normalizeBioprospectingCompounds(
     pubchemMisses: 0,
     retriesScheduled: 0,
     failed: 0,
+    fuzzyHits: 0,
+    fuzzyCalls: 0,
     elapsed: 0,
   };
 
@@ -1491,7 +1657,12 @@ export async function normalizeBioprospectingCompounds(
   const aliasMap = await loadAliasMap();
 
   // 2) Load the eligible fact set.
-  const facts = await selectPendingFacts({ limit, onlyMissing, maxRetries });
+  const facts = await selectPendingFacts({
+    limit,
+    onlyMissing,
+    maxRetries,
+    includeFailed,
+  });
   summary.scannedFacts = facts.length;
   if (facts.length === 0) {
     summary.elapsed = Date.now() - startedAt;
@@ -1501,18 +1672,35 @@ export async function normalizeBioprospectingCompounds(
   // 3) Per-fact processing with isolated error handling.
   for (const fact of facts) {
     if (params.dryRun) {
-      // Dry-run: count what we WOULD do without writing.
+      // Dry-run: count what we WOULD do without writing. We also
+      // report the variant count that would be tried if
+      // `tryFuzzyVariants` were on, so the operator can see the
+      // cost of a recovery pass before running it for real.
       const resolved = resolveInitialStatus(fact.compound, aliasMap);
       if (resolved.status === "verified") summary.aliasHits++;
-      else summary.pubchemMisses++;
+      else if (tryFuzzyVariants) {
+        const variants = buildCompoundNameVariants(fact.compound);
+        const wouldTry = Math.min(maxVariantsPerFact, Math.max(0, variants.length - 1));
+        summary.fuzzyCalls += wouldTry;
+        summary.pubchemMisses++;
+      } else {
+        summary.pubchemMisses++;
+      }
       continue;
     }
     try {
       await processOneFact(
         fact,
-        { aliasMap, gate, fetchImpl: params.fetchImpl },
+        {
+          aliasMap,
+          gate,
+          fetchImpl: params.fetchImpl,
+          tryFuzzyVariants,
+          maxVariantsPerFact,
+        },
         summary,
         maxRetries,
+        includeFailed,
       );
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -1541,22 +1729,32 @@ async function selectPendingFacts(opts: {
   limit: number;
   onlyMissing: boolean;
   maxRetries: number;
+  includeFailed: boolean;
 }): Promise<PendingFactRow[]> {
   const recheckIso = new Date(
     Date.now() - RECHECK_WINDOW_HOURS * 60 * 60 * 1000,
   ).toISOString();
+  // When `includeFailed` is true, we widen the candidate set to
+  // include `failed` rows as well as `pending`. The caller is
+  // expected to use this in combination with `tryFuzzyVariants`
+  // for the recovery flow; `processOneFact` will RESET the
+  // attempts counter so the recovery pass starts fresh.
+  const statusFilter = opts.includeFailed ? "pending,failed" : "pending";
   let query = supabase
     .from("research_bioprospecting_facts")
     .select(
       "id, compound, compound_authority_attempts",
     )
-    .eq("compound_authority_status", "pending")
+    .in("compound_authority_status", statusFilter.split(","))
     .not("compound", "is", null)
     .order("created_at", { ascending: true })
     .limit(opts.limit);
-  if (opts.onlyMissing) {
+  if (opts.onlyMissing && !opts.includeFailed) {
     // Compound predicate: attempts<MAX OR at IS NULL OR at<NOW()-24h
     // PostgREST can't express a multi-clause OR cleanly; we use OR.
+    // We do NOT apply this filter when including `failed` rows —
+    // the recovery flow intentionally re-runs every failed fact
+    // once with the fuzzy variants.
     const max = opts.maxRetries;
     query = query.or(
       `compound_authority_attempts.lt.${max},compound_authority_at.is.null,compound_authority_at.lt.${recheckIso}`,
@@ -1584,6 +1782,8 @@ type ProcessCtx = {
   aliasMap: Map<string, string>;
   gate: RateGate;
   fetchImpl?: typeof fetch;
+  tryFuzzyVariants: boolean;
+  maxVariantsPerFact: number;
 };
 
 async function processOneFact(
@@ -1591,6 +1791,7 @@ async function processOneFact(
   ctx: ProcessCtx,
   summary: BackfillSummary,
   maxRetries: number,
+  includeFailed: boolean,
 ): Promise<void> {
   // 1) Re-check the alias map (in case an admin added one since the fact was extracted).
   const initial = resolveInitialStatus(fact.compound, ctx.aliasMap);
@@ -1618,6 +1819,8 @@ async function processOneFact(
 
   // 2) PubChem path. Both calls go through the gate.
   let cid: number | null;
+  let cidLookupName = fact.compound;
+  let triedVariants: string[] = [];
   try {
     cid = await fetchPubChemCid(fact.compound, ctx.gate, {
       ...(ctx.fetchImpl ? { fetchImpl: ctx.fetchImpl } : {}),
@@ -1636,8 +1839,65 @@ async function processOneFact(
     throw err;
   }
 
+  // 2a) Fuzzy fallback. If the original name returned 404 and the
+  //     caller opted in, try the deterministic variants produced
+  //     by `buildCompoundNameVariants`. Each variant is tried
+  //     serially; the first CID hit wins. We log every attempt
+  //     and report the cumulative call count via summary.fuzzyCalls.
+  if (cid == null && ctx.tryFuzzyVariants) {
+    const variants = buildCompoundNameVariants(fact.compound);
+    // variants[0] is the original name (already tried). Skip it.
+    const candidates = variants.slice(1, 1 + ctx.maxVariantsPerFact);
+    for (const variant of candidates) {
+      triedVariants.push(variant);
+      summary.fuzzyCalls++;
+      let variantCid: number | null;
+      try {
+        variantCid = await fetchPubChemCid(variant, ctx.gate, {
+          ...(ctx.fetchImpl ? { fetchImpl: ctx.fetchImpl } : {}),
+        });
+      } catch (err) {
+        if (err instanceof PubChemRateLimited) {
+          // Server signal — bail out of the variant loop but do
+          // NOT mark the fact as failed; the next scheduled run
+          // will re-pick it.
+          logger.warn(
+            { factId: fact.id, retryAfterMs: err.retryAfterMs, variant },
+            "compound_authority_backfill_fuzzy_rate_limited",
+          );
+          return;
+        }
+        if (err instanceof PubChemNotFound) {
+          continue;
+        }
+        // Unknown fetch error — re-raise so the per-fact try
+        // catches it and the operator sees it in the logs.
+        throw err;
+      }
+      if (variantCid != null) {
+        cid = variantCid;
+        cidLookupName = variant;
+        summary.fuzzyHits++;
+        logger.info(
+          { factId: fact.id, original: fact.compound, variant, cid },
+          "compound_authority_fuzzy_recovery_hit",
+        );
+        break;
+      }
+    }
+  }
+
   if (cid == null) {
-    await handleMiss(fact, "pubchem 404 not found", summary, maxRetries);
+    const triedSuffix =
+      triedVariants.length > 0
+        ? ` (tried ${triedVariants.length} variants)`
+        : "";
+    await handleMiss(
+      fact,
+      `pubchem 404 not found${triedSuffix}`,
+      summary,
+      maxRetries,
+    );
     return;
   }
 
@@ -1662,36 +1922,55 @@ async function processOneFact(
   }
 
   // 3) Upsert canonical + write a starter alias for the fact's
-  //    compound name (so the next pass hits the alias map).
+  //    compound name (so the next pass hits the alias map). When
+  //    the canonical row was located via a fuzzy variant, we use
+  //    the original compound name as the alias (the paper's
+  //    spelling) AND the variant that hit PubChem (so the next
+  //    similar fact does not need to re-do the search).
   const canonical = await upsertCanonicalByPubChem({
     cid: props.cid,
-    canonicalName: fact.compound,
+    canonicalName: cidLookupName,
     inchiKey: props.inchiKey,
     formula: props.formula,
     iupac: props.iupac,
   });
-  try {
-    await upsertAlias({
-      compoundId: canonical.id,
-      alias: fact.compound,
-      source: "pubchem",
-      confidence: "medium",
-    });
-  } catch (err) {
-    // Alias insert failure is non-fatal — the canonical row is
-    // committed and a retry on a later pass will re-upsert the alias.
-    logger.warn(
-      { err, factId: fact.id, canonicalId: canonical.id },
-      "compound_authority_backfill_alias_upsert_failed",
-    );
+  const aliasInsertions: Array<{ alias: string; source: "pubchem" }> = [
+    { alias: fact.compound, source: "pubchem" },
+  ];
+  if (cidLookupName !== fact.compound) {
+    aliasInsertions.push({ alias: cidLookupName, source: "pubchem" });
+  }
+  for (const { alias, source } of aliasInsertions) {
+    try {
+      await upsertAlias({
+        compoundId: canonical.id,
+        alias,
+        source,
+        confidence: "medium",
+      });
+    } catch (err) {
+      // Alias insert failure is non-fatal — the canonical row is
+      // committed and a retry on a later pass will re-upsert the alias.
+      logger.warn(
+        { err, factId: fact.id, canonicalId: canonical.id, alias },
+        "compound_authority_backfill_alias_upsert_failed",
+      );
+    }
   }
 
-  // 4) Stamp verified.
+  // 4) Stamp verified. When this is a recovery pass over a fact
+  //    that was previously `failed`, reset the attempts counter
+  //    so the next backfill cycle starts fresh. The includeFailed
+  //    flag is the only path that touches `failed` facts; we
+  //    capture that here as the audit signal that this transition
+  //    was a recovery, not a normal run.
+  const attempts = includeFailed ? 0 : undefined;
   await attachCanonicalToFact({
     factId: fact.id,
     canonicalId: canonical.id,
     status: "verified",
     reason: COMPOUND_AUTHORITY_REASONS.pubchemResolved,
+    ...(attempts !== undefined ? { attempts } : {}),
   });
   summary.pubchemHits++;
 }

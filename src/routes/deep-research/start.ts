@@ -1734,6 +1734,39 @@ These molecular changes align with established longevity pathways (Converging nu
         completedTasks: tasksToExecute, // All tasks from current level
       });
 
+      // Ground the hypothesis against the evidence pack so the user does
+      // not see invented specifics when the literature agents returned only
+      // tangential background. Soft-fail: keep the raw hypothesis if the
+      // verifier itself errors so the iteration does not abort.
+      try {
+        const { verifyHypothesisAgainstEvidence } = await import(
+          "../../services/researchBrain/verifier"
+        );
+        const evidencePack = conversationState.values.researchBrainEvidence;
+        if (evidencePack) {
+          const grounded = await verifyHypothesisAgainstEvidence({
+            question: currentObjective,
+            hypothesis: hypothesisResult.hypothesis,
+            evidencePack,
+          });
+          if (grounded !== hypothesisResult.hypothesis) {
+            logger.info(
+              {
+                originalLength: hypothesisResult.hypothesis.length,
+                groundedLength: grounded.length,
+              },
+              "hypothesis_grounded_against_evidence",
+            );
+          }
+          hypothesisResult = { ...hypothesisResult, hypothesis: grounded };
+        }
+      } catch (error) {
+        logger.warn(
+          { error },
+          "hypothesis_grounding_skipped_non_fatal",
+        );
+      }
+
       // Update conversation state with new hypothesis
       conversationState.values.currentHypothesis = hypothesisResult.hypothesis;
       if (conversationState.id) {

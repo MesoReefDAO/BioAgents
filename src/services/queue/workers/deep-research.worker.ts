@@ -946,6 +946,41 @@ async function processDeepResearchJob(
       completedTasks: tasksToExecute,
     });
 
+    // Ground the hypothesis against the evidence pack so the user does not
+    // see invented specifics (compound class, IC₅₀ range, mechanism, strain)
+    // when the literature agents returned only tangential background.
+    // Soft-fail: if the verifier itself errors, keep the raw hypothesis so the
+    // iteration does not abort on a transient LLM hiccup.
+    try {
+      const { verifyHypothesisAgainstEvidence } = await import(
+        "../../../services/researchBrain/verifier"
+      );
+      const evidencePack = conversationState.values.researchBrainEvidence;
+      if (evidencePack) {
+        const grounded = await verifyHypothesisAgainstEvidence({
+          question: currentObjective,
+          hypothesis: hypothesisResult.hypothesis,
+          evidencePack,
+        });
+        if (grounded !== hypothesisResult.hypothesis) {
+          logger.info(
+            {
+              jobId: job.id,
+              originalLength: hypothesisResult.hypothesis.length,
+              groundedLength: grounded.length,
+            },
+            "hypothesis_grounded_against_evidence",
+          );
+        }
+        hypothesisResult = { ...hypothesisResult, hypothesis: grounded };
+      }
+    } catch (error) {
+      logger.warn(
+        { error, jobId: job.id },
+        "hypothesis_grounding_skipped_non_fatal",
+      );
+    }
+
     conversationState.values.currentHypothesis = hypothesisResult.hypothesis;
     if (conversationState.id) {
       await persistConversationState();

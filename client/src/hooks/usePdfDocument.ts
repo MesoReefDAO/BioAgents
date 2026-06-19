@@ -53,6 +53,37 @@ export function usePdfDocument(sourceId: string | null) {
       if (token) headers.Authorization = `Bearer ${token}`;
       headers["X-User-Id"] = userId;
 
+      // The PDF proxy can return a JSON error envelope (e.g. when the
+      // storage provider is unconfigured, returning 502 with
+      // `{error, message}`). PDF.js will surface the raw response as
+      // "Unexpected server response (NNN)" — opaque to the user. Probe
+      // the URL with a HEAD-ish GET first and surface the API's own
+      // message when the body isn't a PDF.
+      const probe = await fetch(
+        `/api/research-brain/sources/${sourceId}/pdf`,
+        {
+          method: "GET",
+          headers: { ...headers, Range: "bytes=0-0" },
+          credentials: "include",
+        },
+      );
+      if (!probe.ok) {
+        let apiMessage = "";
+        const contentType = probe.headers.get("content-type") || "";
+        if (contentType.includes("application/json")) {
+          try {
+            const body = await probe.json();
+            apiMessage = body?.message || body?.error || "";
+          } catch {
+            // ignore — fall through to status-based message
+          }
+        }
+        throw new Error(
+          apiMessage ||
+            `PDF proxy returned ${probe.status} ${probe.statusText}`,
+        );
+      }
+
       // PDF.js accepts a URL with `httpHeaders` for cross-origin auth
       // — we set them inline. Credentials are also included for the
       // same-site cookie fallback.

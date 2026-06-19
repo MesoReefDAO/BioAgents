@@ -1,6 +1,8 @@
 // Must be first - polyfills for pdf-parse/pdfjs-dist
 import "./utils/canvas-polyfill";
 
+import path from "node:path";
+
 import { cors } from "@elysiajs/cors";
 import { Elysia } from "elysia";
 import { artifactsRoute } from "./routes/artifacts";
@@ -233,9 +235,10 @@ const app = new Elysia()
   })
 
   // Serve static UI images (welcome background, etc.)
+  // Images live under client/dist/assets/images/ after build:client runs.
   .get("/images/*", async ({ request }) => {
     const url = new URL(request.url);
-    const filePath = `client/dist${url.pathname}`;
+    const filePath = `client/dist/assets${url.pathname}`;
     const file = Bun.file(filePath);
     if (!(await file.exists())) {
       return new Response("Not Found", { status: 404 });
@@ -250,6 +253,79 @@ const app = new Elysia()
             ? "image/webp"
             : "application/octet-stream";
     return new Response(file, { headers: { "Content-Type": contentType } });
+  })
+
+  // Serve bundled assets (videos, fonts, future static files from client/public/*)
+  // Supports HTTP Range requests so <video>/<audio> can seek.
+  .get("/assets/*", async ({ request }) => {
+    const url = new URL(request.url);
+    const safePath = path.normalize(url.pathname).replace(/^(\.\.[/\\])+/, "");
+    if (!safePath.startsWith("/assets/")) {
+      return new Response("Forbidden", { status: 403 });
+    }
+    const relative = safePath.replace(/^\/assets\//, "");
+    const filePath = path.join("client/dist/assets", relative);
+    const file = Bun.file(filePath);
+    if (!(await file.exists())) {
+      return new Response("Not Found", { status: 404 });
+    }
+    const ext = relative.split(".").pop()?.toLowerCase() ?? "";
+    const contentType =
+      ext === "mp4" ? "video/mp4"
+      : ext === "webm" ? "video/webm"
+      : ext === "mov" ? "video/quicktime"
+      : ext === "ogv" ? "video/ogg"
+      : ext === "ogg" ? "audio/ogg"
+      : ext === "mp3" ? "audio/mpeg"
+      : ext === "wav" ? "audio/wav"
+      : ext === "png" ? "image/png"
+      : ext === "jpg" || ext === "jpeg" ? "image/jpeg"
+      : ext === "webp" ? "image/webp"
+      : ext === "gif" ? "image/gif"
+      : ext === "svg" ? "image/svg+xml"
+      : ext === "woff" ? "font/woff"
+      : ext === "woff2" ? "font/woff2"
+      : ext === "ttf" ? "font/ttf"
+      : ext === "otf" ? "font/otf"
+      : "application/octet-stream";
+
+    const rangeHeader = request.headers.get("range");
+    if (!rangeHeader) {
+      return new Response(file, {
+        headers: {
+          "Content-Type": contentType,
+          "Cache-Control": "public, max-age=3600",
+          "Accept-Ranges": "bytes",
+        },
+      });
+    }
+
+    const match = /^bytes=(\d*)-(\d*)$/.exec(rangeHeader.trim());
+    if (!match) {
+      return new Response("Malformed Range", { status: 416 });
+    }
+    const start = match[1] === "" ? null : Number(match[1]);
+    const end = match[2] === "" ? null : Number(match[2]);
+    const total = file.size;
+    const rangeStart = start ?? Math.max(0, total - (end ?? 0));
+    const rangeEnd = end ?? (start != null ? total - 1 : total - 1);
+    if (rangeStart >= total || rangeEnd >= total || rangeStart > rangeEnd) {
+      return new Response("Range Not Satisfiable", {
+        status: 416,
+        headers: { "Content-Range": `bytes */${total}` },
+      });
+    }
+    const slice = file.slice(rangeStart, rangeEnd + 1);
+    return new Response(slice, {
+      status: 206,
+      headers: {
+        "Content-Type": contentType,
+        "Content-Length": String(rangeEnd - rangeStart + 1),
+        "Content-Range": `bytes ${rangeStart}-${rangeEnd}/${total}`,
+        "Accept-Ranges": "bytes",
+        "Cache-Control": "public, max-age=3600",
+      },
+    });
   })
 
   // Serve source map for debugging

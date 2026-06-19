@@ -1,10 +1,12 @@
 # BioAgents — Estado Actual de la Plataforma
 
-> **Documento de estado interno** (17 junio 2026) — qué pueden hacer los usuarios hoy, qué no, y qué viene.
+> **Documento de estado interno** (19 junio 2026) — qué pueden hacer los usuarios hoy, qué no, y qué viene.
 
 ## TL;DR
 
 BioAgents es un **AI Scientist Framework** para bioprospecting. Los usuarios suben papers científicos, el sistema extrae datos estructurados (compuestos, actividades biológicas, claims), detecta contradicciones entre papers, deduplica findings repetidos, y deja al investigador navegar **hasta el párrafo, tabla o figura exactos** de donde viene cada claim. La plataforma **acumula conocimiento verificable** a lo largo de miles de papers, con cada claim linkeado a su evidencia concreta.
+
+> ⚠️ **Constraint de capacidad (jun 2026)**: la cuenta de OpenRouter está sin saldo. El roadmap abajo está filtrado por dependencia de LLM: tareas 🟢 LLM-free y 🟡 v1-sin-LLM son **accionables hoy**; las 🔴 LLM-required quedan en backlog hasta que vuelva el crédito.
 
 ---
 
@@ -211,39 +213,67 @@ research_bioprospecting_dedup_audit — soft-delete merge history
 
 ## Roadmap — Qué Viene
 
-### 🔴 Alta prioridad (lo que falta para cerrar el círculo)
+> **Constraint de capacidad (jun 2026)**: la cuenta de OpenRouter está sin saldo.
+> El roadmap está filtrado por **dependencia de LLM en runtime**:
+>
+> - 🟢 **LLM-free** = se puede avanzar ahora (código, SQL, heurística, UI, config)
+> - 🟡 **LLM-light** = v1 sin LLM + v2 con LLM cuando haya saldo
+> - 🔴 **LLM-required** = bloqueado hasta recargar saldo
+>
+> Toda etiqueta 🟢 o 🟡 es **accionable hoy**. Las 🔴 quedan en el roadmap
+> pero solo se empiezan a hacer cuando vuelva a haber crédito en OpenRouter.
 
-| # | Feature | Esfuerzo | Por qué importa |
-|---|---|---|---|
-| 1 | **Re-evaluation scheduled worker** (BullMQ cron) | M (1-2 días) | Habilita "papers nuevos relevantes para discoveries viejos" |
-| 2 | **Read migration** (Discovery persistence PR #2) | M (1-2 días) | Los consumers dejan de leer JSONB, leen DB → un solo source of truth |
-| 3 | **Entity mention graph** (KG PR #2) | M (1-2 días) | "Este compound trata enfermedad Y" — curates registries de targets/applications |
-| 4 | **LLM semantic linker** (KG PR #3) | M (1-2 días) | Relaciones automáticas entre facts sin link manual |
-| 5 | **Citation graph cross-paper** | L (3-5 días) | Papers conectados vía shared compounds, "este paper confirma A" |
+### 🔴 Alta prioridad
+
+| # | Feature | Esfuerzo | LLM? | Por qué importa |
+|---|---|---|---|---|
+| 1 | **Commitear trabajo en disco** (LocalStorageProvider + assets route + hypothesis grounding + Range support) | XS (1 sesión) | 🟢 no | 2 features completas sin commitear, riesgo bajo |
+| 2 | **Resolver 200 PubChem `failed`** | M (1-2 días) | 🟢 no | Heurística de strings (alias, fuzzy, normalización) recupera ~50-80 facts |
+| 3 | **Read migration** (Discovery persistence PR #2) | M (1-2 días) | 🟢 no | Consumers dejan JSONB, leen DB → un solo source of truth |
+| 4 | **Re-evaluation scheduled worker v1** (BullMQ cron, sin LLM) | M (1-2 días) | 🟡 v1 sin LLM | Match por metadata (compound/species), no por semántica. v2 con LLM después |
+| 5 | **Multi-page table merge** (detector + prompt reescrito) | M (1-2 días) | 🟢 no | Lógica de merge es previa al prompt; el extractor queda intacto |
+| 6 | **Citation graph cross-paper** | L (3-5 días) | 🟢 no | SQL + `compound_canonical_id` join. Conecta papers por shared compounds |
+| 7 | **Entity mention graph** (KG PR #2) | M (1-2 días) | 🔴 sí | "Este compound trata enfermedad Y" requiere LLM extraction |
+| 8 | **LLM semantic linker** (KG PR #3) | M (1-2 días) | 🔴 sí | Relaciones automáticas entre facts sin link manual |
 
 ### 🟡 Media prioridad
 
-| # | Feature | Esfuerzo | Por qué importa |
-|---|---|---|---|
-| 6 | **Multi-language papers** (es, pt) | M (1-2 días) | Bioprospecting sudamericano es nuestro nicho |
-| 7 | **Edit/annotation en provenance viewer** | M (1-2 días) | Investigador puede marcar cells de tabla con notas |
-| 8 | **Compound authority v2** (more curators) | M (1-2 días) | +500 compuestos curados, más idiomas |
-| 9 | **Resolver fallos de PubChem** (200 facts `failed`) | M (1-2 días) | Algunos son nombres reales que PubChem tiene bajo otro alias — necesita heurística de búsqueda alternativa |
-| 10 | **Auth resolver: role `researcher`** | S (1 día) | Relajar el "todo es admin" |
+| # | Feature | Esfuerzo | LLM? | Por qué importa |
+|---|---|---|---|---|
+| 9 | **Corpus ingestion dashboard** | M (1-2 días) | 🟢 no | UI admin que lista docs, lee de DB, status counters |
+| 10 | **Document ingestion worker pool** | S-M | 🟢 no | BullMQ concurrencia, sin LLM |
+| 11 | **Multi-language papers** (es, pt) | M (1-2 días) | 🟢 no | Bioprospecting sudamericano es nuestro nicho; depende más de Mistral OCR config que de LLM |
+| 12 | **Edit/annotation en provenance viewer** | M (1-2 días) | 🟢 no | Investigador puede marcar cells de tabla con notas |
+| 13 | **Compound authority v2** (more curators) | M (1-2 días) | 🟢 no | +500 compuestos curados, más idiomas; seed + backfill sin LLM |
+| 14 | **Auth resolver: role `researcher`** | S (1 día) | 🟢 no | Relajar el "todo es admin" |
 
 ### 🟢 Baja prioridad / especulativo
 
-| # | Feature | Esfuerzo | Por qué importa |
-|---|---|---|---|
-| 11 | **RLHF en fact extraction** | XL (1+ semana) | Quality mejora con el uso |
-| 12 | **XObject extraction** (re-spike con pdfjs@6) | M | Recuperar figuras vector-only cuando salga |
-| 13 | **Coverage report + CI gate** | S (1 día) | Higiene de tests |
+| # | Feature | Esfuerzo | LLM? | Por qué importa |
+|---|---|---|---|---|
+| 15 | **Re-evaluation v2** (LLM semantic match) | M (1-2 días) | 🔴 sí | Upgrade del #4 cuando haya saldo |
+| 16 | **RLHF en fact extraction** | XL (1+ semana) | 🔴 sí | Quality mejora con el uso |
+| 17 | **XObject extraction** (re-spike con pdfjs@6) | M | 🟢 no | Recuperar figuras vector-only cuando salga |
+| 18 | **Coverage report + CI gate** | S (1 día) | 🟢 no | Higiene de tests |
 
 ### Principio detrás del orden
 
-La prioridad #1 (re-eval worker) es la más valiosa porque **completa el ciclo de discovery persistence** que recién cerramos. Sin ella, el botón "check for updates" es manual y aislado. Con ella, el sistema empieza a "vivir" — corre solo, detecta cambios, alerta al usuario.
+**Esta semana** (sin saldo LLM): el objetivo es **vaciar el backlog LLM-free** y dejar
+los 🟡 (v1) con código sin LLM. Cuando vuelva el saldo, los LLM-required (#7, #8, #15, #16)
+arrancan sobre cimientos que ya están en producción.
 
-La #2 (read migration) es técnica pero habilita las #3 y #4 (KG extensions) sin doble-source-of-truth.
+1. **#1 Commit en disco** (15-30 min) — primer paso antes de cualquier otra cosa.
+2. **#2 PubChem fuzzy recovery** — quick win visible en el KG (más compounds visibles).
+3. **#3 Read migration** — refactor habilitante, sin riesgo de runtime.
+4. **#4 Re-eval v1 (sin LLM)** — completa el ciclo de discovery persistence.
+5. **#5/#6 Multi-page + citation graph** — depth del bioprospecting, sin LLM.
+6. **#9/#10 UI + infra** — pulido.
+
+Cuando vuelva el saldo:
+- #7 Entity mention graph
+- #8 LLM semantic linker
+- #15 Re-eval v2 (semantic match)
+- #16 RLHF loop
 
 ---
 
@@ -303,15 +333,24 @@ La #2 (read migration) es técnica pero habilita las #3 y #4 (KG extensions) sin
 
 ## Cómo Continuar
 
-Las opciones concretas para el próximo cambio, en orden de valor:
+> **Constraint activo**: OpenRouter sin saldo. Priorizar tareas 🟢 (LLM-free) y 🟡 v1 (sin LLM).
 
-1. **#1 Re-evaluation scheduled worker** (PR #3 de discovery persistence) — 1-2 días, completa el ciclo
-2. **#3 Read migration** (PR #2 de discovery persistence) — 1-2 días, habilita KG extensions
-3. **#4 Entity mention graph** (PR #2 de knowledge graph) — 1-2 días, extiende KG
-4. **#9 Resolver fallos de PubChem** — algunos de los 200 `failed` tienen alias válidos pero mal escritos en el paper. Heurística de búsqueda fuzzy podría recuperar ~50-80 de ellos.
-5. **#5 Citation graph cross-paper** — 3-5 días, conecta papers via shared compounds
+**Próximo paso recomendado** (en orden, sin LLM):
 
-Si querés arrancar con uno, decime cuál. Si querés descansar, este documento es el snapshot del estado al **17 de junio de 2026**.
+1. **#1 Commit trabajo en disco** (LocalStorageProvider + assets route + hypothesis grounding) — 15-30 min, ganancia segura
+2. **#2 PubChem fuzzy recovery** — quick win visible (más compounds en el KG)
+3. **#3 Read migration** — refactor habilitante, 0% LLM
+4. **#4 Re-evaluation v1 (sin LLM)** — completa el ciclo de discovery persistence
+5. **#5 Multi-page table merge** — depth del bioprospecting
+6. **#6 Citation graph cross-paper** — conectar papers via shared compounds
+
+**Cuando vuelva el saldo** OpenRouter:
+- #7 Entity mention graph (KG PR #2)
+- #8 LLM semantic linker (KG PR #3)
+- #15 Re-evaluation v2 (semantic match)
+- #16 RLHF loop
+
+Si querés arrancar con uno, decime cuál. Si querés descansar, este documento es el snapshot del estado al **19 de junio de 2026**.
 
 ## Documentos relacionados
 

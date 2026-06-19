@@ -248,6 +248,42 @@ export type CompoundAuthorityJobResult = {
 };
 
 /**
+ * Job data for the discovery-reeval queue.
+ * A scheduled tick that drives the "is this discovery still alive?"
+ * pass. v1 (this PR) is LLM-free — the verdict is derived from SQL
+ * joins against the existing fact and contradiction tables. The job
+ * carries no per-tick data; the worker pulls the due set from the
+ * DB. Kept as an explicit interface so future enhancements (e.g.
+ * forcing a specific discovery or a forced full re-eval) can be
+ * added without breaking BullMQ's repeat registration.
+ */
+export type DiscoveryReevalJobData = Record<string, never>;
+
+/**
+ * Result returned by the discovery-reeval worker on completion.
+ * Mirrors the `ReevalRunSummary` shape from
+ * `services/researchBrain/discoveryReeval.ts`. The worker emits
+ * this as a structured logger event under the name
+ * `discovery_reeval_run_summary` so operators can grep during
+ * rollout.
+ *
+ * `pendingRetained` is the count of due rows that were claimed
+ * (`* -> pending`) but the verdict write failed. They stay in
+ * `pending` until the next tick; this is how the system
+ * self-heals from transient DB errors without manual
+ * intervention.
+ */
+export type DiscoveryReevalJobResult = {
+  scanned: number;
+  clean: number;
+  extended: number;
+  contradicted: number;
+  errors: number;
+  pendingRetained: number;
+  elapsed: number;
+};
+
+/**
  * Job data for contradiction detection (manual re-run via queue).
  * Same queue as bioprospecting; worker routes by shape detection.
  * If maxChunks/batchSize are absent, it's a contradiction detection job.

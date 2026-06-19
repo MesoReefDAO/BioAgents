@@ -21,6 +21,8 @@ import type {
   BioprospectingJobData,
   CompoundAuthorityJobData,
   CompoundAuthorityJobResult,
+  DiscoveryReevalJobData,
+  DiscoveryReevalJobResult,
 } from "./types";
 import logger from "../../utils/logger";
 
@@ -32,12 +34,16 @@ let paperGenerationQueueInstance: Queue<PaperGenerationJobData, PaperGenerationJ
 let documentIngestionQueueInstance: Queue<DocumentIngestionJobData, DocumentIngestionJobResult> | null = null;
 let bioprospectingQueueInstance: Queue<BioprospectingJobData, any> | null = null;
 let compoundAuthorityQueueInstance: Queue<CompoundAuthorityJobData, CompoundAuthorityJobResult> | null = null;
+let discoveryReevalQueueInstance: Queue<DiscoveryReevalJobData, DiscoveryReevalJobResult> | null = null;
 
 /** Sentinel: when true, we already attempted to register the
  * repeatable job for the compound-authority queue in this process.
  * Prevents double-registration when the queue getter is called from
  * multiple sites (e.g. worker.ts and a future /api trigger). */
 let compoundAuthorityRepeatRegistered = false;
+
+/** Same sentinel for the discovery-reeval queue. */
+let discoveryReevalRepeatRegistered = false;
 
 /**
  * Get or create the chat queue
@@ -371,6 +377,103 @@ export function getCompoundAuthorityQueue(): Queue<
 }
 
 /**
+ * Get or create the discovery-reeval queue.
+ *
+ * The queue drives a scheduled "is this discovery still alive?"
+ * pass on the `research_discoveries` table. v1 (this PR) is
+ * LLM-free — the verdict (clean / extended / contradicted) is
+ * computed from SQL joins. The repeat interval is driven by
+ * `DISCOVERY_REEVAL_INTERVAL_HOURS` (default 24).
+ *
+ * Disable switches (mirrors the compound-authority pattern):
+ *   - `DISCOVERY_REEVAL_ENABLED=false` — skip repeat registration
+ *     entirely (the queue is still created and queryable, so an
+ *     admin can still enqueue a one-shot via Bull Board).
+ *   - `DISCOVERY_REEVAL_INTERVAL_HOURS=0` — same as disabled.
+ *
+ * The queue uses `attempts: 1` because the per-row retry is
+ * handled inside the worker (`pendingRetained` summary field).
+ * BullMQ does not need to retry the whole job on a single
+ * bad row.
+ */
+export function getDiscoveryReevalQueue(): Queue<
+  DiscoveryReevalJobData,
+  DiscoveryReevalJobResult
+> {
+  if (!isJobQueueEnabled()) {
+    throw new Error("Job queue is not enabled. Set USE_JOB_QUEUE=true to use queues.");
+  }
+
+  if (!discoveryReevalQueueInstance) {
+    discoveryReevalQueueInstance = new Queue<
+      DiscoveryReevalJobData,
+      DiscoveryReevalJobResult
+    >("discovery-reeval", {
+      connection: getBullMQConnection(),
+      defaultJobOptions: {
+        // Per-row retry is handled inside the worker. A whole-job
+        // retry would re-claim rows that may already be in
+        // `pending` (a duplicate of work the previous attempt
+        // already did). Same pattern as compound-authority.
+        attempts: 1,
+        removeOnComplete: {
+          age: 3600,
+          count: 100,
+        },
+        removeOnFail: {
+          age: 86400,
+        },
+      },
+    });
+
+    logger.info(
+      { queue: "discovery-reeval" },
+      "discovery_reeval_queue_initialized",
+    );
+  }
+
+  if (!discoveryReevalRepeatRegistered) {
+    discoveryReevalRepeatRegistered = true;
+    const enabled = process.env.DISCOVERY_REEVAL_ENABLED !== "false";
+    const intervalHoursRaw = process.env.DISCOVERY_REEVAL_INTERVAL_HOURS;
+    const intervalHours = intervalHoursRaw ? Number(intervalHoursRaw) : 24;
+    if (!enabled) {
+      logger.info(
+        { queue: "discovery-reeval" },
+        "discovery_reeval_repeat_disabled_by_env",
+      );
+    } else if (!Number.isFinite(intervalHours) || intervalHours <= 0) {
+      logger.info(
+        { queue: "discovery-reeval", intervalHoursRaw },
+        "discovery_reeval_repeat_disabled_zero_interval",
+      );
+    } else {
+      const everyMs = Math.floor(intervalHours * 60 * 60 * 1000);
+      void discoveryReevalQueueInstance
+        .add(
+          "discovery-reeval-tick",
+          {},
+          { repeat: { every: everyMs } },
+        )
+        .then(() => {
+          logger.info(
+            { queue: "discovery-reeval", everyMs, intervalHours },
+            "discovery_reeval_repeat_registered",
+          );
+        })
+        .catch((err: unknown) => {
+          logger.error(
+            { err, queue: "discovery-reeval", everyMs },
+            "discovery_reeval_repeat_registration_failed",
+          );
+        });
+    }
+  }
+
+  return discoveryReevalQueueInstance;
+}
+
+/**
  * Close all queue instances (for graceful shutdown)
  */
 export async function closeQueues(): Promise<void> {
@@ -382,6 +485,7 @@ export async function closeQueues(): Promise<void> {
     documentIngestionQueueInstance,
     bioprospectingQueueInstance,
     compoundAuthorityQueueInstance,
+    discoveryReevalQueueInstance,
   ];
 
   await Promise.all(
@@ -397,10 +501,12 @@ export async function closeQueues(): Promise<void> {
   documentIngestionQueueInstance = null;
   bioprospectingQueueInstance = null;
   compoundAuthorityQueueInstance = null;
-  // Note: we do NOT reset `compoundAuthorityRepeatRegistered` here —
-  // in a graceful shutdown the process is exiting; if the queue
-  // is recreated in the same process, repeat is still durable in
-  // Redis and we want a stable "registered once" contract.
+  discoveryReevalQueueInstance = null;
+  // Note: we do NOT reset `compoundAuthorityRepeatRegistered` or
+  // `discoveryReevalRepeatRegistered` here — in a graceful shutdown
+  // the process is exiting; if the queue is recreated in the same
+  // process, repeat is still durable in Redis and we want a stable
+  // "registered once" contract.
 
   logger.info("queues_closed");
 }

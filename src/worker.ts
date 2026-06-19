@@ -18,9 +18,10 @@ import { startPaperGenerationWorker } from "./services/queue/workers/paper-gener
 import { createDocumentIngestionWorker } from "./services/queue/workers/document-ingestion.worker";
 import { createBioprospectingWorker } from "./services/queue/workers/bioprospecting.worker";
 import { createCompoundAuthorityWorker } from "./services/queue/workers/compoundAuthority.worker";
+import { createDiscoveryReevalWorker } from "./services/queue/workers/discoveryReeval.worker";
 import { closeConnections } from "./services/queue/connection";
 import { startDailyApiUsageGc } from "./services/queue/dailyApiUsageGc";
-import { getCompoundAuthorityQueue } from "./services/queue/queues";
+import { getCompoundAuthorityQueue, getDiscoveryReevalQueue } from "./services/queue/queues";
 import logger from "./utils/logger";
 
 async function main() {
@@ -54,6 +55,29 @@ async function main() {
     }
   }
 
+  // Same bootstrap pattern for the discovery-reeval queue.
+  // Gated by DISCOVERY_REEVAL_ENABLED (default true). The
+  // repeatable interval is DISCOVERY_REEVAL_INTERVAL_HOURS
+  // (default 24). Without this call, the queue would only be
+  // created lazily on the first trigger (which v1 does not have
+  // — the worker is the only entry point), so the worker would
+  // idle forever.
+  if (process.env.DISCOVERY_REEVAL_ENABLED !== "false") {
+    try {
+      const discoveryReevalQueue = getDiscoveryReevalQueue();
+      logger.info(
+        { queue: "discovery-reeval" },
+        "discovery_reeval_queue_initialized_at_worker_boot",
+      );
+      void discoveryReevalQueue;
+    } catch (err) {
+      logger.warn(
+        { err },
+        "discovery_reeval_queue_init_failed_continuing",
+      );
+    }
+  }
+
   // Start workers
   const chatWorker = startChatWorker();
   const deepResearchWorker = startDeepResearchWorker();
@@ -77,6 +101,21 @@ async function main() {
     );
   }
 
+  // Discovery-reeval worker is gated by DISCOVERY_REEVAL_ENABLED
+  // (default true). When disabled, the worker is NOT created at
+  // all — same contract as compound-authority.
+  const discoveryReevalEnabled =
+    process.env.DISCOVERY_REEVAL_ENABLED !== "false";
+  const discoveryReevalWorker = discoveryReevalEnabled
+    ? createDiscoveryReevalWorker()
+    : null;
+  if (!discoveryReevalEnabled) {
+    logger.info(
+      { env: "DISCOVERY_REEVAL_ENABLED=false" },
+      "discovery_reeval_worker_disabled",
+    );
+  }
+
   // Nightly GC for the `daily_api_usage` table. The spec mandates a
   // 35-day retention window (2 full 30-day cap windows + 5-day clock
   // skew buffer). Gated by `COST_GUARD_GC_ENABLED` (default true).
@@ -93,6 +132,7 @@ async function main() {
       documentIngestionConcurrency: process.env.DOCUMENT_INGESTION_CONCURRENCY || 2,
       bioprospectingConcurrency: process.env.BIOPROSPECTING_CONCURRENCY || 1,
       compoundAuthorityConcurrency: 1,
+      discoveryReevalConcurrency: 1,
       redisUrl: process.env.REDIS_URL ? "[REDACTED]" : "redis://localhost:6379",
     },
     "workers_started",
@@ -117,6 +157,13 @@ async function main() {
         compoundAuthorityWorker
           .close()
           .then(() => logger.info("compound_authority_worker_closed")),
+      );
+    }
+    if (discoveryReevalWorker) {
+      closePromises.push(
+        discoveryReevalWorker
+          .close()
+          .then(() => logger.info("discovery_reeval_worker_closed")),
       );
     }
 

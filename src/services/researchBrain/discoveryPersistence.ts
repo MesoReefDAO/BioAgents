@@ -586,3 +586,240 @@ async function insertEvidenceRows(
     return false;
   }
 }
+
+// ---------------------------------------------------------------------------
+// loadDiscoveriesForConversation — read-through for downstream consumers
+// (PR #2 of discovery-persistence)
+//
+// Replaces the JSONB read path (`conversationState.values.discoveries`)
+// for the consumers that build LLM prompts and user-facing UI off the
+// current set of findings. The discovery agent itself keeps reading the
+// JSONB because it is the LLM's input for the SAME iteration; the new
+// rows are not yet persisted when the agent runs.
+//
+// Modes (env var DISCOVERY_READ_SOURCE):
+//   - "jsonb" (default for dev): always return the JSONB. The DB is
+//     written but not read; useful when the operator wants to verify
+//     the dual-write without trusting the read.
+//   - "db" (default for prod): read from the table. If the table is
+//     empty for this conversation, fall back to the JSONB and log
+//     `discovery_read_db_empty_fallback` so operators see the gap.
+//   - "dual": read BOTH and compare. If they match (same set of
+//     normalized title+claim keys), use the DB. If they differ, log
+//     `discovery_read_mismatch` with the diff and return the DB set
+//     (DB is the source of truth). This is the rollout mode: a single
+//     cycle of "dual" with zero mismatches is the green light to
+//     flip DISCOVERY_READ_SOURCE to "db" and disable "dual".
+//
+// The function NEVER throws. On any unrecoverable DB error, it falls
+// back to the JSONB and logs a structured event.
+// ---------------------------------------------------------------------------
+
+export type DiscoveryReadSource = "jsonb" | "db" | "dual";
+
+const DEFAULT_READ_SOURCE: DiscoveryReadSource = "db";
+
+export type LoadDiscoveriesParams = {
+  conversationId: string;
+  fallbackDiscoveries: Discovery[];
+  /** Optional override for the read mode. Defaults to
+   * env `DISCOVERY_READ_SOURCE` (or "db" if unset). */
+  source?: DiscoveryReadSource;
+  /** Optional logger fields (e.g. jobId, userId). */
+  loggerFields?: Record<string, unknown>;
+};
+
+export type LoadDiscoveriesResult = {
+  discoveries: Discovery[];
+  /** The source that produced the result. */
+  source: "jsonb" | "db";
+  /** When source="db" and the DB was empty for this conversation
+   * (i.e. we fell back to the JSONB), this is `true`. */
+  dbWasEmpty: boolean;
+  /** When running in "dual" mode, this carries the comparison
+   * outcome for the operator dashboard. `null` when not in dual. */
+  dualComparison: null | {
+    dbCount: number;
+    jsonbCount: number;
+    /** Normalized `(title + claim)` key set present in DB but not
+     * in JSONB. */
+    onlyInDb: string[];
+    /** Normalized key set present in JSONB but not in DB. */
+    onlyInJsonb: string[];
+  };
+};
+
+function readSourceFromEnv(): DiscoveryReadSource {
+  const raw = process.env.DISCOVERY_READ_SOURCE?.toLowerCase().trim();
+  if (raw === "jsonb" || raw === "db" || raw === "dual") return raw;
+  return DEFAULT_READ_SOURCE;
+}
+
+/**
+ * Convert a normalized (lowercase, NFKD, alnum-only, space-collapsed)
+ * form of `title + " " + claim` to a stable comparison key. This is
+ * the same shape used by the persist path's `discoveryStableKey`, but
+ * we keep an independent implementation here so the read path is
+ * correct even if the persist path's key formula changes.
+ */
+export function normalizedKey(title: string, claim: string): string {
+  const joined = `${title || ""} ${claim || ""}`;
+  return joined
+    .normalize("NFKD")
+    .replace(/\p{Diacritic}/gu, "")
+    .replace(/[^a-zA-Z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+/**
+ * Pure shape conversion: `ResearchDiscoveryWithEvidence[]` (DB row
+ * shape) to `Discovery[]` (consumer/JSONB shape). Preserves the
+ * `created_at DESC` ordering the upstream `getDiscoveriesForConversation`
+ * already produces, and defaults optional fields to safe empties.
+ *
+ * Evidence rows are deduplicated by `task_id` (the first row wins) so
+ * a supersede cycle that re-inserted carry-over evidence does not
+ * produce duplicates downstream.
+ */
+export function dbDiscoveriesToDomain(
+  rows: ResearchDiscoveryWithEvidence[],
+): Discovery[] {
+  return rows.map((row) => {
+    const seen = new Set<string>();
+    const evidenceArray: Discovery["evidenceArray"] = [];
+    for (const ev of row.evidence || []) {
+      if (!ev.task_id) continue;
+      if (seen.has(ev.task_id)) continue;
+      seen.add(ev.task_id);
+      evidenceArray.push({
+        taskId: ev.task_id,
+        ...(ev.job_id ? { jobId: ev.job_id } : {}),
+        explanation: ev.explanation || "",
+      });
+    }
+    return {
+      title: row.title,
+      claim: row.claim,
+      summary: row.summary,
+      evidenceArray,
+      artifacts: (row.artifacts as Discovery["artifacts"]) || [],
+      novelty: row.novelty || "",
+    };
+  });
+}
+
+function keySet(rows: Discovery[]): Set<string> {
+  const out = new Set<string>();
+  for (const r of rows) out.add(normalizedKey(r.title, r.claim));
+  return out;
+}
+
+export async function loadDiscoveriesForConversation(
+  params: LoadDiscoveriesParams,
+): Promise<LoadDiscoveriesResult> {
+  const source = params.source ?? readSourceFromEnv();
+  const baseLog = {
+    conversationId: params.conversationId,
+    source,
+    ...params.loggerFields,
+  };
+
+  if (source === "jsonb") {
+    return {
+      discoveries: params.fallbackDiscoveries || [],
+      source: "jsonb",
+      dbWasEmpty: false,
+      dualComparison: null,
+    };
+  }
+
+  // db or dual: query the table.
+  let dbRows: ResearchDiscoveryWithEvidence[] = [];
+  try {
+    dbRows = await getDiscoveriesForConversation({
+      conversationId: params.conversationId,
+    });
+  } catch (err) {
+    logger.error(
+      { err, ...baseLog },
+      "discovery_read_db_failed_falling_back_to_jsonb",
+    );
+    return {
+      discoveries: params.fallbackDiscoveries || [],
+      source: "jsonb",
+      dbWasEmpty: false,
+      dualComparison: null,
+    };
+  }
+
+  // Empty DB is a legitimate state (no discoveries yet, or a fresh
+  // conversation). Fall back to the JSONB cache so downstream
+  // prompts still get the LLM's last-known good output.
+  if (dbRows.length === 0) {
+    logger.warn(
+      {
+        ...baseLog,
+        jsonbCount: (params.fallbackDiscoveries || []).length,
+      },
+      "discovery_read_db_empty_fallback",
+    );
+    return {
+      discoveries: params.fallbackDiscoveries || [],
+      source: "jsonb",
+      dbWasEmpty: true,
+      dualComparison: null,
+    };
+  }
+
+  const dbDiscoveries = dbDiscoveriesToDomain(dbRows);
+  const jsonbDiscoveries = params.fallbackDiscoveries || [];
+
+  if (source === "dual") {
+    const dbKeys = keySet(dbDiscoveries);
+    const jsonbKeys = keySet(jsonbDiscoveries);
+    const onlyInDb: string[] = [];
+    const onlyInJsonb: string[] = [];
+    for (const k of dbKeys) if (!jsonbKeys.has(k)) onlyInDb.push(k);
+    for (const k of jsonbKeys) if (!dbKeys.has(k)) onlyInJsonb.push(k);
+    if (onlyInDb.length > 0 || onlyInJsonb.length > 0) {
+      logger.warn(
+        {
+          ...baseLog,
+          dbCount: dbKeys.size,
+          jsonbCount: jsonbKeys.size,
+          onlyInDbCount: onlyInDb.length,
+          onlyInJsonbCount: onlyInJsonb.length,
+          // Sample up to 5 of each so the log line is bounded.
+          onlyInDbSample: onlyInDb.slice(0, 5),
+          onlyInJsonbSample: onlyInJsonb.slice(0, 5),
+        },
+        "discovery_read_mismatch",
+      );
+    } else {
+      logger.info(
+        { ...baseLog, dbCount: dbKeys.size, jsonbCount: jsonbKeys.size },
+        "discovery_read_dual_match",
+      );
+    }
+    return {
+      discoveries: dbDiscoveries,
+      source: "db",
+      dbWasEmpty: false,
+      dualComparison: {
+        dbCount: dbKeys.size,
+        jsonbCount: jsonbKeys.size,
+        onlyInDb,
+        onlyInJsonb,
+      },
+    };
+  }
+
+  return {
+    discoveries: dbDiscoveries,
+    source: "db",
+    dbWasEmpty: false,
+    dualComparison: null,
+  };
+}

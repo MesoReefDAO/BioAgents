@@ -69,6 +69,7 @@ services:
         CORALGPT_HERO_VIDEO_URL: ${CORALGPT_HERO_VIDEO_URL:-}
         GIT_SHA: ${GIT_SHA:-unknown}
         BUILD_DATE: ${BUILD_DATE:-}
+        SKIP_CLIENT_BUILD: ${SKIP_CLIENT_BUILD:-0}
     container_name: bioagents-api
     expose:
       - "${PORT:-3000}"
@@ -203,6 +204,7 @@ services:
         CORALGPT_HERO_VIDEO_URL: ${CORALGPT_HERO_VIDEO_URL:-}
         GIT_SHA: ${GIT_SHA:-unknown}
         BUILD_DATE: ${BUILD_DATE:-}
+        SKIP_CLIENT_BUILD: ${SKIP_CLIENT_BUILD:-0}
     container_name: bioagents-worker
     command: ["bun", "run", "src/worker.ts"]
     volumes:

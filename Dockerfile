@@ -53,7 +53,7 @@ ARG PRIVY_APP_ID
 ARG CORALGPT_HERO_VIDEO_URL
 
 # Build metadata for /api/version + Footer. GIT_SHA is auto-injected by the
-# compose build args (or set to "unknown" if you build the image directly).
+# compose build args; if absent we resolve it from the build context's .git.
 ARG GIT_SHA=unknown
 ARG BUILD_DATE
 
@@ -64,8 +64,19 @@ ENV CORALGPT_HERO_VIDEO_URL=${CORALGPT_HERO_VIDEO_URL}
 ENV GIT_SHA=${GIT_SHA}
 ENV BUILD_DATE=${BUILD_DATE}
 
-# Build the client (--no-sourcemap avoids Permission denied on dist/ when re-running)
-RUN cd client && bun run build -- --no-sourcemap
+# Build the client (--no-sourcemap avoids Permission denied on dist/ when re-running).
+# Pass SKIP_CLIENT_BUILD=1 to reuse a pre-built client/dist/ from the build
+# context (e.g. produced locally by bin/build-and-up.sh). This avoids the
+# "version mismatch" warning caused by .dockerignore stripping .git/ from the
+# build context, which makes the in-container `git rev-parse` inside
+# client/build.ts fall back to "unknown". client/dist/ is therefore NOT in
+# .dockerignore so the COPY below can pick it up.
+ARG SKIP_CLIENT_BUILD=0
+RUN if [ "${SKIP_CLIENT_BUILD}" != "1" ]; then \
+      cd client && bun run build -- --no-sourcemap; \
+    else \
+      echo "Skipping client build — using pre-built client/dist/ from context"; \
+    fi
 
 # Remove dev dependencies after build
 RUN bun install --production

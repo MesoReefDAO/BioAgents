@@ -6,7 +6,7 @@
  * Supports watch mode with --watch flag
  */
 
-import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync, watch } from 'fs';
+import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync, watch } from 'fs';
 import { join, resolve } from 'path';
 
 const clientDir = import.meta.dir;
@@ -123,11 +123,18 @@ async function build() {
 
   writeFileSync(htmlDest, htmlContent);
 
-  // Copy static assets (images, etc.) from public/ to dist/
-  const publicImagesDir = join(clientDir, 'public', 'images');
-  const distImagesDir = join(distDir, 'images');
-  if (existsSync(publicImagesDir)) {
-    cpSync(publicImagesDir, distImagesDir, { recursive: true });
+  // Copy static assets (images, videos, etc.) from public/ to dist/assets/
+  // Skip index.html — it is rendered with injected CSS above.
+  const publicDir = join(clientDir, 'public');
+  const distAssetsDir = join(distDir, 'assets');
+  if (existsSync(publicDir)) {
+    const entries = readdirSync(publicDir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.name === 'index.html') continue;
+      const src = join(publicDir, entry.name);
+      const dest = join(distAssetsDir, entry.name);
+      cpSync(src, dest, { recursive: true });
+    }
   }
 
   const buildTime = Date.now() - startTime;

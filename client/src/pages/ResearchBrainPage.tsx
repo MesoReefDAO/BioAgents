@@ -29,20 +29,20 @@ const ENTITY_FIELDS: Array<{
   key: keyof ResearchBrainFactEntityPatch;
   label: string;
 }> = [
-  { key: "species", label: "Especie" },
-  { key: "genus", label: "Género" },
-  { key: "family", label: "Familia" },
-  { key: "organismGroup", label: "Grupo" },
-  { key: "geography", label: "Geografía" },
-  { key: "ecosystem", label: "Ecosistema" },
-  { key: "organismPart", label: "Parte" },
-  { key: "compound", label: "Compuesto" },
-  { key: "compoundClass", label: "Clase" },
-  { key: "moleculeType", label: "Molécula" },
-  { key: "bioactivity", label: "Bioactividad" },
-  { key: "applicationArea", label: "Aplicación" },
-  { key: "assayModel", label: "Ensayo/modelo" },
-  { key: "condition", label: "Condición" },
+  { key: "species", label: "Species" },
+  { key: "genus", label: "Genus" },
+  { key: "family", label: "Family" },
+  { key: "organismGroup", label: "Group" },
+  { key: "geography", label: "Geography" },
+  { key: "ecosystem", label: "Ecosystem" },
+  { key: "organismPart", label: "Part" },
+  { key: "compound", label: "Compound" },
+  { key: "compoundClass", label: "Class" },
+  { key: "moleculeType", label: "Molecule" },
+  { key: "bioactivity", label: "Bioactivity" },
+  { key: "applicationArea", label: "Application" },
+  { key: "assayModel", label: "Assay/model" },
+  { key: "condition", label: "Condition" },
 ];
 
 function statusLabel(status: string | null | undefined) {
@@ -76,18 +76,18 @@ function factTitle(fact: ResearchBrainBioprospectingFact) {
 }
 
 function strengthLabel(strength: string) {
-  if (strength === "direct") return "directa";
-  if (strength === "indirect") return "indirecta";
-  if (strength === "hypothesis") return "hipótesis";
-  return "revisar";
+  if (strength === "direct") return "direct";
+  if (strength === "indirect") return "indirect";
+  if (strength === "hypothesis") return "hypothesis";
+  return "review";
 }
 
 function reviewLabel(status: string) {
-  if (status === "verified") return "verificado";
-  if (status === "needs_review") return "necesita revisión";
-  if (status === "incorrect") return "incorrecto";
-  if (status === "quarantined") return "cuarentena";
-  return "sin revisar";
+  if (status === "verified") return "verified";
+  if (status === "needs_review") return "needs review";
+  if (status === "incorrect") return "incorrect";
+  if (status === "quarantined") return "quarantined";
+  return "unreviewed";
 }
 
 function correctionFieldLabel(field: string) {
@@ -164,7 +164,7 @@ export function ResearchBrainPage({ coralGptMode = false }: Props) {
       setSelectedSourceId(result.sourceId);
       setActiveTab("sources");
     } catch (err: any) {
-      setUploadError(err?.message || "No se pudo cargar el paper");
+      setUploadError(err?.message || "Could not load the paper");
     } finally {
       setIsUploading(false);
     }
@@ -241,7 +241,7 @@ export function ResearchBrainPage({ coralGptMode = false }: Props) {
       });
       await handleEvidenceSearch();
     } catch (err: any) {
-      setReviewError(err?.message || "No se pudo actualizar en bloque");
+      setReviewError(err?.message || "Could not update in bulk");
     } finally {
       setIsBulkReviewing(false);
     }
@@ -261,7 +261,7 @@ export function ResearchBrainPage({ coralGptMode = false }: Props) {
       );
       await handleEvidenceSearch();
     } catch (err: any) {
-      setReviewError(err?.message || "No se pudo actualizar la revisión");
+      setReviewError(err?.message || "Could not update the review");
     } finally {
       setReviewingFactId(null);
     }
@@ -316,7 +316,7 @@ export function ResearchBrainPage({ coralGptMode = false }: Props) {
       });
       await handleEvidenceSearch();
     } catch (err: any) {
-      setReviewError(err?.message || "No se pudieron guardar las entidades");
+      setReviewError(err?.message || "Could not save entities");
     } finally {
       setUpdatingEntityFactId(null);
     }
@@ -337,7 +337,7 @@ export function ResearchBrainPage({ coralGptMode = false }: Props) {
             onClick={() => route("/library")}
           >
             <Icon name="bookOpen" size={16} />
-            <span>Biblioteca</span>
+            <span>Library</span>
           </button>
           <button className="library-link-btn" onClick={() => route("/chat")}>
             <Icon name="messageSquare" size={16} />
@@ -351,13 +351,13 @@ export function ResearchBrainPage({ coralGptMode = false }: Props) {
           <div>
             <h1>Research Brain</h1>
             <p>
-              Evidencia estructurada extraída de papers cargados. El agente la
-              usa como primera fuente de verdad.
+              Structured evidence extracted from uploaded papers. The
+              agent uses it as the first source of truth.
             </p>
           </div>
           <label className="library-link-btn brain-upload-btn">
             <Icon name="upload" size={16} />
-            <span>{isUploading ? "Cargando…" : "Subir paper"}</span>
+            <span>{isUploading ? "Loading…" : "Upload paper"}</span>
             <input
               type="file"
               accept=".pdf,.md,.txt,.docx"
@@ -378,14 +378,14 @@ export function ResearchBrainPage({ coralGptMode = false }: Props) {
             onClick={() => setActiveTab("evidence")}
           >
             <Icon name="search" size={15} />
-            <span>Evidencia</span>
+            <span>Evidence</span>
           </button>
           <button
             className={activeTab === "sources" ? "active" : ""}
             onClick={() => setActiveTab("sources")}
           >
             <Icon name="folder" size={15} />
-            <span>Fuentes</span>
+            <span>Sources</span>
           </button>
         </div>
 
@@ -402,7 +402,7 @@ export function ResearchBrainPage({ coralGptMode = false }: Props) {
                   onInput={(e) =>
                     setQuery((e.target as HTMLInputElement).value)
                   }
-                  placeholder="Buscar especie, compuesto, bioactividad o condición"
+                  placeholder="Search species, compound, bioactivity, or condition"
                 />
                 <button
                   className="paper-send-btn brain-search-btn"
@@ -431,13 +431,13 @@ export function ResearchBrainPage({ coralGptMode = false }: Props) {
                       setMeasurementUnit((e.target as HTMLSelectElement).value)
                     }
                   >
-                    <option value="">Todas</option>
+                    <option value="">All</option>
                     <option value="%">%</option>
                     <option value="fold-change">fold-change</option>
                   </select>
                 </label>
                 <label>
-                  Dirección
+                  Direction
                   <select
                     value={measurementDirection}
                     onChange={(e) =>
@@ -446,15 +446,15 @@ export function ResearchBrainPage({ coralGptMode = false }: Props) {
                       )
                     }
                   >
-                    <option value="">Todas</option>
-                    <option value="increase">Aumento</option>
-                    <option value="decrease">Disminución</option>
-                    <option value="no_change">Sin cambio</option>
-                    <option value="mixed">Mixto</option>
+                    <option value="">All</option>
+                    <option value="increase">Increase</option>
+                    <option value="decrease">Decrease</option>
+                    <option value="no_change">No change</option>
+                    <option value="mixed">Mixed</option>
                   </select>
                 </label>
                 <label>
-                  Condición
+                  Condition
                   <input
                     value={condition}
                     onInput={(e) =>
@@ -464,7 +464,7 @@ export function ResearchBrainPage({ coralGptMode = false }: Props) {
                   />
                 </label>
                 <label>
-                  Revisión
+                  Review
                   <select
                     value={reviewStatusFilter}
                     onChange={(e) =>
@@ -473,17 +473,17 @@ export function ResearchBrainPage({ coralGptMode = false }: Props) {
                       )
                     }
                   >
-                    <option value="">Activas</option>
-                    <option value="all">Todas</option>
-                    <option value="unreviewed">Sin revisar</option>
-                    <option value="verified">Verificadas</option>
-                    <option value="needs_review">Necesitan revisión</option>
-                    <option value="incorrect">Incorrectas</option>
-                    <option value="quarantined">Cuarentena</option>
+                    <option value="">Active</option>
+                    <option value="all">All</option>
+                    <option value="unreviewed">Unreviewed</option>
+                    <option value="verified">Verified</option>
+                    <option value="needs_review">Needs review</option>
+                    <option value="incorrect">Incorrect</option>
+                    <option value="quarantined">Quarantined</option>
                   </select>
                 </label>
                 <label>
-                  Fuerza
+                  Strength
                   <select
                     value={evidenceStrengthFilter}
                     onChange={(e) =>
@@ -492,11 +492,11 @@ export function ResearchBrainPage({ coralGptMode = false }: Props) {
                       )
                     }
                   >
-                    <option value="">Todas</option>
-                    <option value="direct">Directa</option>
-                    <option value="indirect">Indirecta</option>
-                    <option value="hypothesis">Hipótesis</option>
-                    <option value="unknown">Revisar</option>
+                    <option value="">All</option>
+                    <option value="direct">Direct</option>
+                    <option value="indirect">Indirect</option>
+                    <option value="hypothesis">Hypothesis</option>
+                    <option value="unknown">Review</option>
                   </select>
                 </label>
                 <label>
@@ -509,20 +509,20 @@ export function ResearchBrainPage({ coralGptMode = false }: Props) {
                       )
                     }
                   >
-                    <option value="">Todas</option>
-                    <option value="internal">Internas</option>
-                    <option value="external">Externas</option>
+                    <option value="">All</option>
+                    <option value="internal">Internal</option>
+                    <option value="external">External</option>
                   </select>
                 </label>
                 <label>
-                  Fuente
+                  Source
                   <select
                     value={sourceIdFilter}
                     onChange={(e) =>
                       setSourceIdFilter((e.target as HTMLSelectElement).value)
                     }
                   >
-                    <option value="">Todas</option>
+                    <option value="">All</option>
                     {sources.map((source) => (
                       <option key={source.id} value={source.id}>
                         {source.title}
@@ -534,7 +534,7 @@ export function ResearchBrainPage({ coralGptMode = false }: Props) {
             </form>
 
             {evidenceLoading && (
-              <div className="library-state">Buscando evidencia…</div>
+              <div className="library-state">Searching evidence…</div>
             )}
             {evidenceError && !evidenceLoading && (
               <div className="library-state library-state-error">
@@ -574,8 +574,8 @@ export function ResearchBrainPage({ coralGptMode = false }: Props) {
                     />
                     <span>
                       {selectedVisibleCount > 0
-                        ? `${selectedVisibleCount} seleccionados`
-                        : "Seleccionar visibles"}
+                        ? `${selectedVisibleCount} selected`
+                        : "Select visible"}
                     </span>
                   </label>
                   <input
@@ -584,7 +584,7 @@ export function ResearchBrainPage({ coralGptMode = false }: Props) {
                     onInput={(e) =>
                       setBulkReviewNote((e.target as HTMLInputElement).value)
                     }
-                    placeholder="Nota bulk opcional"
+                    placeholder="Optional bulk note"
                   />
                   <div className="brain-bulk-actions">
                     <button
@@ -609,7 +609,7 @@ export function ResearchBrainPage({ coralGptMode = false }: Props) {
                       disabled={selectedVisibleCount === 0 || isBulkReviewing}
                       onClick={() => handleBulkReview("quarantined")}
                     >
-                      Cuarentena
+                      Quarantine
                     </button>
                   </div>
                 </div>
@@ -618,7 +618,7 @@ export function ResearchBrainPage({ coralGptMode = false }: Props) {
                   <section className="brain-facts-list">
                     {facts.length === 0 && (
                       <div className="library-state">
-                        No hay facts bioprospectivos para esta búsqueda.
+                        No bioprospecting facts for this search.
                       </div>
                     )}
                     {facts.map((fact) => (
@@ -632,7 +632,7 @@ export function ResearchBrainPage({ coralGptMode = false }: Props) {
                             checked={selectedFactIds.has(fact.id)}
                             onChange={() => toggleFactSelection(fact.id)}
                           />
-                          <span>Seleccionar</span>
+                          <span>Select</span>
                         </label>
                         <div className="brain-fact-header">
                           <div>
@@ -652,7 +652,7 @@ export function ResearchBrainPage({ coralGptMode = false }: Props) {
                         >
                           <Icon name="check" size={14} />
                           <span>
-                            Revisión: {reviewLabel(fact.reviewStatus)}
+                            Review: {reviewLabel(fact.reviewStatus)}
                             {fact.reviewedAt
                               ? ` · ${new Date(
                                   fact.reviewedAt,
@@ -662,7 +662,7 @@ export function ResearchBrainPage({ coralGptMode = false }: Props) {
                         </div>
                         {fact.reviewNote && (
                           <div className="brain-review-note">
-                            <strong>Nota:</strong> {fact.reviewNote}
+                            <strong>Note:</strong> {fact.reviewNote}
                           </div>
                         )}
                         {fact.lastEntityCorrection &&
@@ -685,9 +685,9 @@ export function ResearchBrainPage({ coralGptMode = false }: Props) {
                                     key={field}
                                   >
                                     <span>{correctionFieldLabel(field)}</span>
-                                    <code>{change.before || "vacío"}</code>
+                                    <code>{change.before || "empty"}</code>
                                     <Icon name="chevronRight" size={14} />
-                                    <code>{change.after || "vacío"}</code>
+                                    <code>{change.after || "empty"}</code>
                                   </div>
                                 ))}
                             </div>
@@ -756,7 +756,7 @@ export function ResearchBrainPage({ coralGptMode = false }: Props) {
                         )}
 
                         <div className="brain-fact-source">
-                          <span>{fact.sourceTitle || "Fuente interna"}</span>
+                          <span>{fact.sourceTitle || "Internal source"}</span>
                           {/*
                             PR #3 — provenance affordance on fact
                             cards. The badge is the keyboard-
@@ -845,13 +845,13 @@ export function ResearchBrainPage({ coralGptMode = false }: Props) {
 
                         <div className="brain-review-note-editor">
                           <label>
-                            Nota de revisión
+                            Review note
                             <textarea
                               value={
                                 reviewNotes[fact.id] ?? fact.reviewNote ?? ""
                               }
                               rows={2}
-                              placeholder="Motivo de la decisión, corrección sugerida o duda puntual"
+                              placeholder="Reason for the decision, suggested correction, or specific concern"
                               onInput={(e) =>
                                 setReviewNotes((current) => ({
                                   ...current,
@@ -901,7 +901,7 @@ export function ResearchBrainPage({ coralGptMode = false }: Props) {
                               handleReviewFact(fact, "quarantined")
                             }
                           >
-                            Cuarentena
+                            Quarantine
                           </button>
                         </div>
                       </article>
@@ -909,14 +909,14 @@ export function ResearchBrainPage({ coralGptMode = false }: Props) {
                   </section>
 
                   <aside className="brain-evidence-side">
-                    <h3>Secciones sugeridas</h3>
+                    <h3>Suggested sections</h3>
                     <div className="brain-section-tags">
                       {evidencePack.queryPlan.answerSections.map((section) => (
                         <span key={section}>{section}</span>
                       ))}
                     </div>
 
-                    <h3>Fuentes</h3>
+                    <h3>Sources</h3>
                     <div className="brain-source-mini-list">
                       {evidencePack.sources.map((source) => (
                         <button
@@ -946,7 +946,7 @@ export function ResearchBrainPage({ coralGptMode = false }: Props) {
         {activeTab === "sources" && (
           <>
             {isLoading && (
-              <div className="library-state">Cargando Research Brain…</div>
+              <div className="library-state">Loading Research Brain…</div>
             )}
             {error && !isLoading && (
               <div className="library-state library-state-error">{error}</div>
@@ -975,7 +975,7 @@ export function ResearchBrainPage({ coralGptMode = false }: Props) {
                   ))}
                   {sources.length === 0 && (
                     <div className="library-state">
-                      No hay fuentes registradas todavía.
+                      No sources registered yet.
                     </div>
                   )}
                 </section>
@@ -999,16 +999,16 @@ export function ResearchBrainPage({ coralGptMode = false }: Props) {
                           onClick={handleExtract}
                         >
                           <Icon name="refresh" size={16} />
-                          <span>Reextraer</span>
+                          <span>Re-extract</span>
                         </button>
                       </div>
 
                       {claimsLoading && (
-                        <div className="library-state">Cargando claims…</div>
+                        <div className="library-state">Loading claims…</div>
                       )}
                       {!claimsLoading && claims.length === 0 && (
                         <div className="library-state">
-                          No hay claims extraídos para esta fuente.
+                          No extracted claims for this source.
                         </div>
                       )}
                       <div className="brain-claims-list">
@@ -1031,7 +1031,7 @@ export function ResearchBrainPage({ coralGptMode = false }: Props) {
                     </>
                   ) : (
                     <div className="library-state">
-                      Elegí una fuente para ver sus claims.
+                      Choose a source to see its claims.
                     </div>
                   )}
                 </section>

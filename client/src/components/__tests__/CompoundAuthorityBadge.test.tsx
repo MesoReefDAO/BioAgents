@@ -232,9 +232,9 @@ describe("CompoundAuthorityBadge — verified with no diff (normalized match)", 
     expect(snap.statuses).toEqual([]);
   });
 
-  it("hides the badge on diacritic-insensitive equality (Curcumín vs curcumin)", () => {
+  it("hides the badge on diacritic-insensitive equality (Curcumin vs curcumin)", () => {
     const snap = renderAndCapture({
-      compound: "Curcumín",
+      compound: "Curcumin",
       compoundAuthorityStatus: "verified",
       compoundCanonicalId: "C1",
       canonicalName: "curcumin",

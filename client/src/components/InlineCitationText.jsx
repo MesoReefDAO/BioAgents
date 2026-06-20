@@ -222,7 +222,7 @@ export function InlineCitationText({ content }) {
       const firstUrl = citation.urls[0];
       let domainName = String(citation.index);
       if (firstUrl.startsWith('/library/')) {
-        domainName = 'Biblioteca';
+        domainName = 'Library';
       } else {
         try {
           domainName = extractDomainName(new URL(firstUrl).hostname);
@@ -332,7 +332,7 @@ export function InlineCitationText({ content }) {
                   {(() => {
                     try {
                       const currentUrl = hoveredCitation.urls[currentSourceIndex];
-                      if (currentUrl.startsWith('/library/')) return 'Biblioteca';
+                      if (currentUrl.startsWith('/library/')) return 'Library';
                       const hostname = new URL(currentUrl).hostname;
                       return extractDomainName(hostname);
                     } catch {

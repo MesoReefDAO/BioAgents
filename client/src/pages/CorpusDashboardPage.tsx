@@ -41,19 +41,19 @@ function MetricsBar({ run }: { run: IngestionRun }) {
     <div class="corpus-metrics-bar">
       <div class="corpus-metric">
         <span class="corpus-metric-value">{speed}</span>
-        <span class="corpus-metric-label">archivos/min</span>
+        <span class="corpus-metric-label">files/min</span>
       </div>
       <div class="corpus-metric">
         <span class="corpus-metric-value">{failureRate}%</span>
-        <span class="corpus-metric-label">tasa fracaso</span>
+        <span class="corpus-metric-label">failure rate</span>
       </div>
       <div class="corpus-metric">
         <span class="corpus-metric-value">${run.llmCost?.toFixed(4) ?? "0.0000"}</span>
-        <span class="corpus-metric-label">costo LLM</span>
+        <span class="corpus-metric-label">LLM cost</span>
       </div>
       <div class="corpus-metric">
         <span class="corpus-metric-value">{elapsed}</span>
-        <span class="corpus-metric-label">transcurrido</span>
+        <span class="corpus-metric-label">elapsed</span>
       </div>
     </div>
   );
@@ -74,22 +74,22 @@ function FileList({ files }: { files: IngestionFileStatus[] }) {
       <div class="corpus-file-list-toolbar">
         <input
           class="corpus-file-search"
-          placeholder="Buscar archivo..."
+          placeholder="Search file..."
           value={filter}
           onInput={(e) => setFilter((e.target as HTMLInputElement).value)}
         />
         <select value={statusFilter} onChange={(e) => setStatusFilter((e.target as HTMLSelectElement).value)}>
-          <option value="">Todos</option>
-          <option value="processed">Procesados</option>
-          <option value="skipped">Saltados</option>
-          <option value="failed">Fallidos</option>
+          <option value="">All</option>
+          <option value="processed">Processed</option>
+          <option value="skipped">Skipped</option>
+          <option value="failed">Failed</option>
         </select>
       </div>
       <table class="corpus-file-table">
         <thead>
           <tr>
-            <th>Archivo</th>
-            <th>Estado</th>
+            <th>File</th>
+            <th>Status</th>
             <th>Chunks</th>
             <th>Error</th>
           </tr>
@@ -108,7 +108,7 @@ function FileList({ files }: { files: IngestionFileStatus[] }) {
             </tr>
           ))}
           {filtered.length === 0 && (
-            <tr><td colspan={4} class="corpus-empty">Sin archivos</td></tr>
+            <tr><td colspan={4} class="corpus-empty">No files</td></tr>
           )}
         </tbody>
       </table>
@@ -145,7 +145,7 @@ export function CorpusDashboardPage() {
       refetchDetails();
       refetch();
     } catch (err: any) {
-      setActionError(err?.message || "No se pudo cancelar");
+      setActionError(err?.message || "Could not cancel");
     } finally {
       setIsCancelling(false);
     }
@@ -160,7 +160,7 @@ export function CorpusDashboardPage() {
       refetchDetails();
       refetch();
     } catch (err: any) {
-      setActionError(err?.message || "No se pudo reintentar");
+      setActionError(err?.message || "Could not retry");
     } finally {
       setIsRetrying(false);
     }
@@ -173,7 +173,7 @@ export function CorpusDashboardPage() {
           <span>BioAgents · Corpus</span>
         </div>
         <div class="corpus-topbar-links">
-          <button class="corpus-link-btn" onClick={() => route("/library")}>Biblioteca</button>
+          <button class="corpus-link-btn" onClick={() => route("/library")}>Library</button>
           <button class="corpus-link-btn" onClick={() => route("/chat")}>Chat</button>
           <button class="corpus-link-btn" onClick={() => route("/brain")}>Research Brain</button>
         </div>
@@ -181,8 +181,8 @@ export function CorpusDashboardPage() {
 
       <main class="corpus-main">
         <div class="corpus-header">
-          <h1>Dashboard de Ingesta</h1>
-          <p>Monitoreo de corpus documental — progreso, errores y costos en tiempo real</p>
+          <h1>Ingestion Dashboard</h1>
+          <p>Document corpus monitoring — progress, errors, and costs in real time</p>
         </div>
 
         {actionError && <div class="corpus-error">{actionError}</div>}
@@ -192,16 +192,16 @@ export function CorpusDashboardPage() {
             <div class="corpus-sidebar-header">
               <h2>Runs</h2>
               <select value={statusFilter} onChange={(e) => setStatusFilter((e.target as HTMLSelectElement).value)}>
-                <option value="">Todos</option>
-                <option value="running">En curso</option>
-                <option value="completed">Completados</option>
-                <option value="completed_with_errors">Con errores</option>
-                <option value="failed">Fallidos</option>
-                <option value="cancelled">Cancelados</option>
+                <option value="">All</option>
+                <option value="running">Running</option>
+                <option value="completed">Completed</option>
+                <option value="completed_with_errors">With errors</option>
+                <option value="failed">Failed</option>
+                <option value="cancelled">Cancelled</option>
               </select>
             </div>
 
-            {isLoading && <div class="corpus-loading">Cargando runs...</div>}
+            {isLoading && <div class="corpus-loading">Loading runs...</div>}
             {error && <div class="corpus-error">{error}</div>}
 
             <div class="corpus-run-list">
@@ -219,7 +219,7 @@ export function CorpusDashboardPage() {
                 </button>
               ))}
               {runs.length === 0 && !isLoading && (
-                <div class="corpus-empty">No hay runs. Iniciá una ingesta desde Research Brain.</div>
+                <div class="corpus-empty">No runs. Start an ingestion from Research Brain.</div>
               )}
             </div>
           </aside>
@@ -227,7 +227,7 @@ export function CorpusDashboardPage() {
           <section class="corpus-detail">
             {!selectedRun && (
               <div class="corpus-empty-state">
-                Seleccioná un run para ver el detalle
+                Select a run to see details
               </div>
             )}
 
@@ -248,14 +248,14 @@ export function CorpusDashboardPage() {
                       disabled={isCancelling || selectedRun.status !== "running"}
                       onClick={handleCancel}
                     >
-                      {isCancelling ? "Cancelando..." : "Cancelar run"}
+                      {isCancelling ? "Cancelling..." : "Cancel run"}
                     </button>
                     <button
                       class="corpus-btn corpus-btn-secondary"
                       disabled={isRetrying || selectedRun.failedFiles === 0}
                       onClick={handleRetry}
                     >
-                      {isRetrying ? "Reintentando..." : `Reintentar ${selectedRun.failedFiles} fallidos`}
+                      {isRetrying ? "Retrying..." : `Retry ${selectedRun.failedFiles} failed`}
                     </button>
                   </div>
                 </div>
@@ -263,7 +263,7 @@ export function CorpusDashboardPage() {
                 <ProgressBar processed={selectedRun.processedFiles} total={selectedRun.totalFiles} />
                 <MetricsBar run={selectedRun} />
 
-                {detailsLoading && <div class="corpus-loading">Cargando archivos...</div>}
+                {detailsLoading && <div class="corpus-loading">Loading files...</div>}
                 {!detailsLoading && <FileList files={files} />}
               </>
             )}

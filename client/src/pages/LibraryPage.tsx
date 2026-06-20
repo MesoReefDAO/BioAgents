@@ -36,7 +36,7 @@ export function LibraryPage({ coralGptMode = false }: LibraryPageProps) {
       await uploadResearchBrainSource(file);
       await refetch();
     } catch (err: any) {
-      setUploadError(err?.message || "No se pudo cargar el paper");
+      setUploadError(err?.message || "Could not load the paper");
     } finally {
       setIsUploading(false);
     }
@@ -48,12 +48,12 @@ export function LibraryPage({ coralGptMode = false }: LibraryPageProps) {
         <div className="library-brand" onClick={() => route("/chat")}>
           <img src="/images/token.png" alt="" width={24} height={24} />
           <span className="library-brand-text">
-            {coralGptMode ? "CoralGPT" : "BioAgents"} · Biblioteca
+            {coralGptMode ? "CoralGPT" : "BioAgents"} · Library
           </span>
         </div>
         <button className="library-link-btn" onClick={() => route("/chat")}>
           <Icon name="messageSquare" size={16} />
-          <span>Ir al chat</span>
+          <span>Go to chat</span>
         </button>
         <button className="library-link-btn" onClick={() => route("/brain")}>
           <Icon name="brainCircuit" size={16} />
@@ -63,17 +63,17 @@ export function LibraryPage({ coralGptMode = false }: LibraryPageProps) {
 
       <main className="library-main">
         <div className="library-heading">
-          <h1>Biblioteca de papers</h1>
+          <h1>Paper library</h1>
           <p>
-            Papers ingestados en la base de conocimiento. Abrí uno para leerlo y
-            hacer preguntas respondidas solo con su contenido.
+            Papers ingested into the knowledge base. Open one to read it
+            and ask questions answered only from its content.
           </p>
         </div>
 
         <div className="brain-upload-row">
           <label className="library-link-btn brain-upload-btn">
             <Icon name="upload" size={16} />
-            <span>{isUploading ? "Cargando…" : "Subir paper"}</span>
+            <span>{isUploading ? "Loading…" : "Upload paper"}</span>
             <input
               type="file"
               accept=".pdf,.md,.txt,.docx"
@@ -86,22 +86,22 @@ export function LibraryPage({ coralGptMode = false }: LibraryPageProps) {
           {uploadError && <span className="brain-error">{uploadError}</span>}
         </div>
 
-        {isLoading && <div className="library-state">Cargando papers…</div>}
+        {isLoading && <div className="library-state">Loading papers…</div>}
 
         {error && !isLoading && (
           <div className="library-state library-state-error">
             <p>{error}</p>
             <button className="library-link-btn" onClick={() => refetch()}>
               <Icon name="refresh" size={16} />
-              <span>Reintentar</span>
+              <span>Retry</span>
             </button>
           </div>
         )}
 
         {!isLoading && !error && papers.length === 0 && (
           <div className="library-state">
-            No hay papers ingestados todavía. Agregá archivos a la carpeta de
-            documentos (KNOWLEDGE_DOCS_PATH) y reiniciá el servidor.
+            No papers ingested yet. Add files to the documents folder
+            (KNOWLEDGE_DOCS_PATH) and restart the server.
           </div>
         )}
 

@@ -12,7 +12,11 @@
  *     (read via the same TDZ-safe resolver the detector uses).
  *
  * Invocation:
- *   bun run scripts/merge-multipage-tables.ts [--apply] [--limit=100]
+ *   bun run merge:tables                    # dry-run, default limit 100
+ *   bun run merge:tables:apply              # write the FKs
+ *   bun run merge:tables --limit=500        # process up to 500 sources
+ *   bun run merge:tables --apply --limit=50 # apply, capped at 50
+ *   bun run merge:tables --help             # this message
  *
  * Exit code: 0 on success or on skip-without-error; non-zero on
  * a real failure (per spec §"Backfill is incremental and dry-run
@@ -25,6 +29,11 @@ import { getServiceClient } from "../src/db/client";
 import { _resetMergeConfigForTests } from "../src/services/files/providers/localPdfTableProvider";
 import { getMergeMode, getMergeThreshold } from "../src/services/files/providers/localPdfTableProvider";
 import { mergeTablesAcrossPages, type MergeOverride } from "../src/services/files/providers/localPdfTableProvider";
+import {
+  collectBackfillPatches,
+  isChainPointer,
+  type BackfillPatch,
+} from "../src/services/files/mergeBackfill";
 import type { ExtractedTable } from "../src/services/files/pdfTableExtractor";
 
 function readArg(name: string): string | undefined {
@@ -41,6 +50,41 @@ function hasFlag(name: string): boolean {
   return process.argv.includes(`--${name}`);
 }
 
+function printHelp(): void {
+  console.log(`merge-multipage-tables - backfill multi-page table chains
+
+USAGE
+  bun run merge:tables [options]
+
+OPTIONS
+  --apply           Write the FK patches. Default: dry-run (no writes).
+  --limit=<n>       Maximum number of candidate sources to process.
+                    Default: 100.
+  --help            Print this help and exit.
+
+ENV
+  TABLE_MERGE_MODE         One of "hard" | "hard-confidence" | "manual".
+                           Default: hard-confidence.
+  TABLE_MERGE_THRESHOLD    Numeric 0..1. Default: 0.7.
+                           Only used by hard-confidence mode.
+
+BEHAVIOR
+  - Incremental: sources with at least one chain row
+    (continues_from_id IS NOT NULL) are skipped.
+  - The merge post-pass runs in-memory on the rows of each
+    candidate source; only the resulting continues_from_id
+    columns are written to the DB.
+  - Synthetic per-batch pointers (<page>-<tableIndex>) emitted
+    by the merge are resolved to real head ids before the
+    UPDATE.
+  - Exit code 0 on success (including "no work to do").
+    Non-zero only on a real DB / network error.
+
+SEE ALSO
+  docs/STATUS.es.md - "Multi-Page Table Merge" runbook.
+`);
+}
+
 interface SourceIdRow {
   source_id: string;
 }
@@ -53,12 +97,11 @@ interface TableRow {
   continues_from_id: string | null;
 }
 
-interface PatchRow {
-  id: string;
-  continues_from_id: string;
-}
-
 async function main() {
+  if (hasFlag("help")) {
+    printHelp();
+    process.exit(0);
+  }
   const dryRun = !hasFlag("apply");
   const limitArg = Number(readArg("limit") || "100");
   const limit = Number.isFinite(limitArg) && limitArg > 0 ? limitArg : 100;
@@ -192,22 +235,10 @@ async function main() {
     // 4. Run the merge post-pass.
     const merged = mergeTablesAcrossPages(tables, mode, [] as MergeOverride[], threshold);
 
-    // 5. Collect the patches (id → continues_from_id).
-    const patches: PatchRow[] = [];
-    for (const t of merged) {
-      if (t.continuesFromId && !isChainPointer(t.continuesFromId)) {
-        patches.push({ id: t.id!, continues_from_id: t.continuesFromId });
-      } else if (t.continuesFromId && isChainPointer(t.continuesFromId)) {
-        // Resolve synthetic pointer to the real head id (by
-        // page/tableIndex).
-        const head = tables.find(
-          (x) => `${x.page}-${x.tableIndex}` === t.continuesFromId,
-        );
-        if (head?.id) {
-          patches.push({ id: t.id!, continues_from_id: head.id });
-        }
-      }
-    }
+    // 5. Collect the patches (id → continues_from_id). The pure
+    //    helper in `mergeBackfill.ts` handles synthetic pointer
+    //    resolution and pre-INSERT row filtering.
+    const patches: BackfillPatch[] = collectBackfillPatches(merged);
 
     if (patches.length === 0) {
       totalSourcesSkipped++;
@@ -280,13 +311,11 @@ async function main() {
   process.exit(0);
 }
 
-/** Local copy of `isChainPointer` from `localPdfTableProvider.ts`
- * to keep the script independent of the provider module's
- * re-exports. Matches `<page>-<tableIndex>`. */
-function isChainPointer(value: string | null | undefined): boolean {
-  if (!value) return false;
-  return /^\d+-\d+$/.test(value);
-}
+/** Local copy of `isChainPointer` is now imported from
+ * `src/services/files/mergeBackfill.ts`. The two copies
+ * (detector's local + backfill module) intentionally mirror each
+ * other; the detector keeps its own copy per the TDZ note in
+ * CLAUDE.md ("module isolation"). */
 
 main().catch((error) => {
   console.error("[merge-multipage-tables] failed");

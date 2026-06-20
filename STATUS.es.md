@@ -231,7 +231,7 @@ research_bioprospecting_dedup_audit — soft-delete merge history
 | 2 | **Resolver 200 PubChem `failed`** | M (1-2 días) | 🟢 no | Heurística de strings (alias, fuzzy, normalización) recupera ~50-80 facts |
 | 3 | **Read migration** (Discovery persistence PR #2) | M (1-2 días) | 🟢 no | Consumers dejan JSONB, leen DB → un solo source of truth |
 | 4 | **Re-evaluation scheduled worker v1** (BullMQ cron, sin LLM) | M (1-2 días) | 🟡 v1 sin LLM | Match por metadata (compound/species), no por semántica. v2 con LLM después |
-| 5 | **Multi-page table merge** (detector + prompt reescrito) | M (1-2 días) | 🟢 no | Lógica de merge es previa al prompt; el extractor queda intacto |
+| 5 | ~~Multi-page table merge~~ ✅ **shipped** (PR #1 + #2 + #3 merged) | — | 🟢 no | Backfill script + package.json + runbook operacionales |
 | 6 | **Citation graph cross-paper** | L (3-5 días) | 🟢 no | SQL + `compound_canonical_id` join. Conecta papers por shared compounds |
 | 7 | **Entity mention graph** (KG PR #2) | M (1-2 días) | 🔴 sí | "Este compound trata enfermedad Y" requiere LLM extraction |
 | 8 | **LLM semantic linker** (KG PR #3) | M (1-2 días) | 🔴 sí | Relaciones automáticas entre facts sin link manual |
@@ -341,8 +341,24 @@ Cuando vuelva el saldo:
 2. **#2 PubChem fuzzy recovery** — quick win visible (más compounds en el KG)
 3. **#3 Read migration** — refactor habilitante, 0% LLM
 4. **#4 Re-evaluation v1 (sin LLM)** — completa el ciclo de discovery persistence
-5. **#5 Multi-page table merge** — depth del bioprospecting
+5. **#5 ~~Multi-page table merge~~ shipped** (PR #1-#3 merged; backfill script disponible, ver runbook abajo)
 6. **#6 Citation graph cross-paper** — conectar papers via shared compounds
+
+**Runbook: Multi-Page Table Merge (backfill operacional)**
+```bash
+# 1) Ver qué parches se aplicarían (dry-run; no escribe nada)
+bun run merge:tables
+
+# 2) Limitar a 500 sources candidatos (default 100)
+bun run merge:tables --limit=500
+
+# 3) Aplicar los parches (escribe los FKs en research_evidence_tables.continues_from_id)
+bun run merge:tables:apply
+
+# 4) Help completo
+bun run merge:tables --help
+```
+El script es incremental: sources con `continues_from_id IS NOT NULL` ya tienen chain y se saltean. Re-runs son no-op. Respeta `TABLE_MERGE_MODE` (default `hard-confidence`) y `TABLE_MERGE_THRESHOLD` (default `0.7`).
 
 **Cuando vuelva el saldo** OpenRouter:
 - #7 Entity mention graph (KG PR #2)

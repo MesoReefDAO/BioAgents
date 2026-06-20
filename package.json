@@ -11,6 +11,8 @@
     "dev": "bun --watch src/index.ts",
     "extract:bioprospecting": "bun run scripts/extract-bioprospecting.ts",
     "ingest:docs": "bun run scripts/ingest-docs.ts",
+    "merge:tables": "bun run scripts/merge-multipage-tables.ts",
+    "merge:tables:apply": "bun run scripts/merge-multipage-tables.ts --apply",
     "migrate": "supabase migration up",
     "migrate:new": "supabase migration new",
     "normalize:measurements": "bun run scripts/normalize-measurements.ts",

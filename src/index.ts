@@ -38,6 +38,7 @@ import { waitlistRoute } from "./routes/waitlist";
 import { createQueueDashboard } from "./routes/admin/queue-dashboard";
 import { adminJobsRoute } from "./routes/admin/jobs";
 import { costTotalsRoute } from "./routes/admin/cost-totals";
+import { privyUsersRoute } from "./routes/admin/privy-users";
 import { versionRoute } from "./routes/version";
 
 // ============================================================================
@@ -476,6 +477,9 @@ app.use(adminJobsRoute);
 
 // Mount admin cost-totals drill-down (api-cost-guard-rails PR #3)
 app.use(costTotalsRoute);
+
+// Mount admin privy-users endpoint
+app.use(privyUsersRoute);
 
 // Continue with catch-all route
 app

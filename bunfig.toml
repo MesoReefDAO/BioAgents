@@ -6,5 +6,8 @@
 # into every test run. The shim is a no-op if a real `document`
 # already exists (e.g., when running under `happy-dom` or in a
 # browser test environment).
+#
+# We also preload a script that removes the `window` global to
+# prevent @privy-io/server-auth from throwing a browser environment error.
 [test]
-preload = ["./client/src/test-dom-shim.ts"]
+preload = ["./client/src/test-dom-shim.ts", "./test-preload-privy.ts"]

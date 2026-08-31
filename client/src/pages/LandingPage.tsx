@@ -207,14 +207,6 @@ export function LandingPage() {
             <a href="#" className="btn-teal-link">
               Learn about $CRLAI
             </a>
-            <a
-              href="https://bioagents.xyz"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="btn-ghost"
-            >
-              View on BioAgents
-            </a>
           </div>
         </div>
       </section>
@@ -242,7 +234,14 @@ export function LandingPage() {
 
       <footer className="landing-footer">
         © 2026 CoralGPT · BioAgent powered by $CRLAI ·{' '}
-        <a href="#">Privacy</a> · <a href="#">Terms</a>
+        <a
+          href="https://github.com/MesoReefDAO/BioAgents"
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          GitHub
+        </a>{' '}
+        · <a href="#">Privacy</a> · <a href="#">Terms</a>
       </footer>
 
       <WaitlistModal

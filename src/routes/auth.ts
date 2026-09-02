@@ -63,10 +63,28 @@ function extractWalletFromPrivyUser(user: any): string | undefined {
 }
 
 function extractEmailFromPrivyUser(user: any): string | undefined {
-  const emailAccount = user.linkedAccounts?.find(
-    (account: any) => account.type === "email",
-  );
-  return emailAccount?.address || user.email?.address;
+  // Privy stores email on several linked-account shapes depending on login
+  // method (email OTP, Google, Apple, etc.). Prefer the top-level email,
+  // then walk linked accounts.
+  const topLevel =
+    (typeof user.email === "string" ? user.email : user.email?.address) ||
+    undefined;
+  if (topLevel) return topLevel;
+
+  const accounts: any[] = user.linkedAccounts || [];
+  for (const account of accounts) {
+    if (
+      account?.type === "email" ||
+      account?.type === "google_oauth" ||
+      account?.type === "apple_oauth" ||
+      account?.type === "discord_oauth" ||
+      account?.type === "github_oauth"
+    ) {
+      const addr = account.address || account.email;
+      if (typeof addr === "string" && addr.includes("@")) return addr;
+    }
+  }
+  return undefined;
 }
 
 export const authRoute = new Elysia({ prefix: "/api/auth" })
@@ -106,7 +124,12 @@ export const authRoute = new Elysia({ prefix: "/api/auth" })
           walletAddress,
         });
 
-        const isWhitelisted = user.access_type === "whitelisted";
+        // An explicitly-granted admin is always allowed, even if their
+        // access_type is still pending. The role claim is only ever the
+        // literal "admin" (see grant-admin CLI + users_role_check constraint),
+        // so it can never carry attacker-controlled input.
+        const isAdmin = user.role === "admin";
+        const isWhitelisted = user.access_type === "whitelisted" || isAdmin;
 
         if (!isWhitelisted) {
           set.status = 403;
@@ -118,7 +141,12 @@ export const authRoute = new Elysia({ prefix: "/api/auth" })
           };
         }
 
-        const token = await generateAuthToken(user.id, email ? { email } : undefined);
+        // Include the role claim ONLY for admins. Normal users get no role
+        // field at all, so a stray/forged role can never leak in for them.
+        const token = await generateAuthToken(user.id, {
+          ...(email ? { email } : {}),
+          ...(isAdmin ? { role: "admin" } : {}),
+        });
         if (!token) {
           set.status = 500;
           return { success: false, message: "Failed to generate authentication token" };
@@ -130,6 +158,7 @@ export const authRoute = new Elysia({ prefix: "/api/auth" })
           token,
           userId: user.id,
           email: email || null,
+          role: user.role,
           expiresIn: JWT_EXPIRATION,
         };
       } catch (error: any) {
